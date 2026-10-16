@@ -16,7 +16,7 @@ solutions are released as data (below).
   Zenodo, <https://doi.org/10.5281/zenodo.23413640> (CC BY 4.0).
 - Paper (in Japanese, with an English abstract): M. Ogino, *Construction of an Iterative Solver
   Benchmark for High-Frequency Electromagnetic Finite Element Analysis: Canonical Problems and
-  Printed Circuit Boards*, Transactions of JSCES, TBD.
+  Printed Circuit Boards*, submitted to Transactions of JSCES.
 
 ## Contents
 
