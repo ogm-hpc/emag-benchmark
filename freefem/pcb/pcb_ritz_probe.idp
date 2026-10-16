@@ -1,0 +1,81 @@
+// Ritz probe (docs/matrix_features.md 8): ritzSteps steps of Arnoldi on the
+// right-preconditioned operator A M^-1 (the operator of the hand-rolled and
+// PETSc GMRES, -ksp_pc_side right), without restart and without solving.
+// Writes the Hessenberg matrix Hbar ((m+1) x m, before any rotation) to
+// ritzFile and exits; freefem/pcb/ritz_features.py computes the Ritz and
+// harmonic Ritz values and the features from it. A M^-1 and M^-1 A have the
+// same eigenvalues.
+//
+// Include-style code block (as gmres_precon.idp) on the caller's globals:
+//   func complex[int] matvec(complex[int] & v)   -- A*v
+//   func complex[int] precon(complex[int] & v)   -- M^-1*v (must be FIXED:
+//     an inner Krylov solve makes the Hessenberg matrix that of no operator;
+//     run_pcb_benchmark.py ritz gives the inner solves "-ksp_type preonly")
+//   matrix<complex> Aloc (penalty rows: |diag| > 1e20), complex[int] b
+//   int ritzSteps, string ritzStart ("rhs" | "random"), int ritzSeed,
+//   string ritzFile (pcb_case_config.idp)
+// Orthogonalization: modified Gram-Schmidt with one full second pass (MGS2),
+// so that the basis stays orthogonal over ritzSteps steps (one MGS pass over
+// 300 steps does not; handoff task F) and no spurious copies of converged
+// Ritz values appear. Stops early at an invariant subspace.
+{
+  int n = Eh.ndof;
+  int K = ritzSteps;
+  complex[int][int] V(K + 1);
+  complex[int, int] H(K + 1, K);
+  H = 0.0;
+  V[0].resize(n);
+  if (ritzStart == "random") {
+    // random start, zero on the on() penalty rows (eigenvalue ~ 1 there for
+    // every preconditioner with a diagonal part; not part of the problem)
+    complex[int] dA = Aloc.diag;
+    randinit(ritzSeed);
+    for (int i = 0; i < n; i++) {
+      real re = randreal1() - 0.5, im = randreal1() - 0.5;
+      if (abs(dA[i]) > 1.0e20) V[0][i] = 0.0;
+      else V[0][i] = re + 1i * im;
+    }
+  } else {
+    V[0] = b;
+  }
+  real beta0 = V[0].l2;
+  V[0] /= beta0;
+  cout << "PHASE setup_done " << (clock() - tStart) << endl;
+  real tRitz0 = clock();
+  int m = 0;
+  for (int j = 0; j < K; j++) {
+    complex[int] z = precon(V[j]);
+    complex[int] w = matvec(z);
+    real wNorm = w.l2;
+    for (int pass = 0; pass < 2; pass++)
+      for (int i = 0; i <= j; i++) {
+        complex hij = V[i]' * w;
+        H(i, j) += hij;
+        w -= hij * V[i];
+      }
+    real hjp1 = w.l2;
+    H(j + 1, j) = hjp1;
+    m = j + 1;
+    cout << "RITZ_STEP " << m << " h " << hjp1 << " time " << (clock() - tRitz0) << endl;
+    if (hjp1 <= 1.0e-12 * wNorm) {
+      cout << "RITZ_INVARIANT " << m << endl;
+      break;
+    }
+    if (j + 1 < K) {
+      V[j + 1].resize(n);
+      V[j + 1] = w;
+      V[j + 1] /= hjp1;
+    }
+  }
+  {
+    ofstream fo(ritzFile);
+    fo.precision(17);
+    fo << m << " " << n << " " << beta0 << "\n";
+    for (int i = 0; i <= m; i++) {
+      for (int k = 0; k < m; k++) fo << real(H(i, k)) << " " << imag(H(i, k)) << " ";
+      fo << "\n";
+    }
+  }
+  cout << "RITZ_DONE " << m << " n " << n << " start " << ritzStart << " time " << (clock() - tRitz0) << endl;
+}
+exit(0);

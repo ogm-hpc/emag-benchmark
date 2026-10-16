@@ -1,0 +1,120 @@
+// HX vector (Pi) correction, the 3rd term of Hiptmair-Xu (docs/paper_plan.md
+// task A1, PCB_SOLVER_VERSION 0.9). Optional: hxVecTerm = 0 (default) builds
+// nothing and hxVecCorr returns 0.
+//
+//   hxVecCorr(r) = Pi0 * (Mvec^-1 * (Pi0^T * r)),   Mvec = Pi0^T S Pi0 + I_bnd
+//
+// Pi: P1^3 (interleaved by node) -> Edge03d tangential interpolation,
+//   Pi(u)_e = (x_head - x_tail) . (u(tail) + u(head)) / 2   (exact for P1 fields),
+// built from MatrixEdgeP1's topology as ../hx_precon.idp. Pi0 is Pi with the
+// columns of the PEC nodes (endpoints of on() penalty edges) zeroed, and I_bnd
+// is the identity on those nodal DOFs. Then the correction is exactly 0 on the
+// PEC edges whatever the inner solve returns: the July 2026 stagnation of the
+// 3-term form (problem_settings.md) came from an inexact (GAMG) inner solution
+// that was not exactly 0 on the eliminated nodes; Pi carried it onto the PEC
+// edges, where the penalty rows (1e30) of A blew it up (freefem/pcb/test_hx3_toy.edp).
+//
+// S (the projected operator) by hxVecTerm:
+//   1  A                     (Galerkin projection of the system matrix, indefinite)
+//   2  A + 2 k0^2 Meps       (= K + k0^2 Meps + surface terms: positive real part, AMS-like)
+//   3  hxVecShift            (caller-provided matrix<complex>, e.g. the CSLP-shifted operator)
+// Mvec is solved by PETSc with hxVecOptions (block size 3; "" = petscOptions,
+// the inner options of the gradient term).
+//
+// Include-style block, included once. Caller-defined globals: mesh3 Th, fespace Eh,
+// matrix<complex> Aloc, real k0, int hxVecTerm, string hxVecOptions, string petscOptions,
+// matrix<complex> hxVecShift (used by hxVecTerm = 3 only; may be empty otherwise),
+// macro massTerm (pcb_common.idp).
+// On return: func complex[int] hxVecCorr(complex[int] & r).
+
+load "mat_edgeP1"
+
+matrix<complex> hxvPi0;
+matrix<complex> hxvRaw = [[1.0, 0, 0], [0, 1.0, 0], [0, 0, 1.0]];   // dummy when off
+if (hxVecTerm > 0) {
+  real hxvT0 = clock();
+  matrix hxvG;
+  MatrixEdgeP1(hxvG, Th);
+  int nEd = hxvG.n, nNd = hxvG.m;
+  int[int] eTail(nEd), eHead(nEd);
+  {
+    int[int] I, J; real[int] C;
+    [I, J, C] = hxvG;
+    for (int t = 0; t < I.n; t++) {
+      if (I[t] >= nEd || J[t] >= nNd) continue;   // MatrixEdgeP1 padding entry
+      if (C[t] < 0) eTail[I[t]] = J[t]; else eHead[I[t]] = J[t];
+    }
+  }
+  // PEC nodes: endpoints of the on() penalty edges
+  int[int] bnd(nNd);
+  bnd = 0;
+  {
+    complex[int] d = Aloc.diag;
+    for (int e = 0; e < nEd; e++)
+      if (abs(d[e]) > 1.0e20) { bnd[eTail[e]] = 1; bnd[eHead[e]] = 1; }
+  }
+  int nBnd = 0;
+  for (int n = 0; n < nNd; n++) nBnd += bnd[n];
+
+  fespace HxvPh(Th, P1);
+  HxvPh hxvX = x, hxvY = y, hxvZ = z;
+  {
+    int[int] I(6 * nEd + 1), J(6 * nEd + 1);
+    complex[int] V(6 * nEd + 1);
+    int t = 0;
+    for (int e = 0; e < nEd; e++) {
+      int a = eTail[e], b = eHead[e];
+      real wa = 0.5 * (1 - bnd[a]), wb = 0.5 * (1 - bnd[b]);
+      real d0 = hxvX[][b] - hxvX[][a], d1 = hxvY[][b] - hxvY[][a], d2 = hxvZ[][b] - hxvZ[][a];
+      I[t] = e; J[t] = 3 * a;     V[t] = wa * d0; t++;
+      I[t] = e; J[t] = 3 * a + 1; V[t] = wa * d1; t++;
+      I[t] = e; J[t] = 3 * a + 2; V[t] = wa * d2; t++;
+      I[t] = e; J[t] = 3 * b;     V[t] = wb * d0; t++;
+      I[t] = e; J[t] = 3 * b + 1; V[t] = wb * d1; t++;
+      I[t] = e; J[t] = 3 * b + 2; V[t] = wb * d2; t++;
+    }
+    I[t] = 0; J[t] = 3 * nNd - 1; V[t] = 0.0;   // full column count
+    hxvPi0 = [I, J, V];
+  }
+
+  matrix<complex> hxvS;
+  if (hxVecTerm == 1) hxvS = Aloc;
+  else if (hxVecTerm == 2) {
+    varf hxvMass([Ex, Ey, Ez], [Vx, Vy, Vz]) = int3d(Th)( massTerm(Ex, Ey, Ez, Vx, Vy, Vz) );
+    matrix<complex> hxvM = hxvMass(Eh, Eh);
+    hxvS = Aloc + (2.0 * k0 * k0) * hxvM;
+  } else if (hxVecTerm == 3) hxvS = hxVecShift;
+  else { cout << "ERROR: hxVecTerm must be 0, 1, 2 or 3" << endl; exit(1); }
+
+  matrix<complex> hxvSP = hxvS * hxvPi0;
+  matrix<complex> hxvGal = hxvPi0' * hxvSP;
+  {
+    int[int] I(3 * nBnd + 1), J(3 * nBnd + 1);
+    complex[int] V(3 * nBnd + 1);
+    int t = 0;
+    for (int n = 0; n < nNd; n++)
+      if (bnd[n]) for (int c = 0; c < 3; c++) { I[t] = 3 * n + c; J[t] = 3 * n + c; V[t] = 1.0; t++; }
+    I[t] = 3 * nNd - 1; J[t] = 3 * nNd - 1; V[t] = 0.0;
+    matrix<complex> hxvIb = [I, J, V];
+    hxvRaw = hxvGal + hxvIb;
+  }
+  cout << "HX_VEC term " << hxVecTerm << " nodes " << nNd << " PEC nodes " << nBnd
+       << " Mvec n " << hxvRaw.n << " nnz " << hxvRaw.nnz << " setup " << (clock() - hxvT0) << " s" << endl;
+}
+Mat<complex> hxvMvec(hxvRaw);
+{
+  string hxvOpts = hxVecOptions;
+  if (hxvOpts == "") hxvOpts = petscOptions;
+  set(hxvMvec, sparams = hxvOpts, bs = 3);
+}
+
+func complex[int] hxVecCorr(complex[int] & r) {
+  complex[int] z(r.n);
+  z = 0.0;
+  if (hxVecTerm > 0) {
+    complex[int] rv = hxvPi0' * r;
+    complex[int] u = hxvMvec^-1 * rv;
+    z = hxvPi0 * u;
+  }
+  return z;
+}

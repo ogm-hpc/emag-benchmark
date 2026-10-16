@@ -1,0 +1,176 @@
+== P01-1  f=1.0 GHz  NDOF=62398  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=0.244)
+   S11  FEM 0.0622 ( -24.13 dB)   177.49 deg | line 0.0015 ( -56.23 dB)  -177.68 deg | |diff| 0.0606
+   S21  FEM 0.9934 (  -0.06 dB)   -92.52 deg | line 0.9986 (  -0.01 dB)   -87.68 deg | |diff| 0.0843
+   eps_eff from the S21 phase: 3.711 (Hammerstad-Jensen 3.332, +11.4 %)
+   PEC 11: rms E_t 1.73e-16  rms E 4.60e+00
+   PEC 12: rms E_t 5.64e-16  rms E 1.67e+01
+   Port1: V = 23.44756+0.06798j V, face area 4.9120 mm^2
+   Port2: V = -1.09328-24.80994j V, face area 4.9120 mm^2
+== P01-1_coarse  f=1.0 GHz  NDOF=15769  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=0.244)
+   S11  FEM 0.1502 ( -16.46 dB)   175.13 deg | line 0.0015 ( -56.23 dB)  -177.68 deg | |diff| 0.1487
+   S21  FEM 0.9836 (  -0.14 dB)   -95.17 deg | line 0.9986 (  -0.01 dB)   -87.68 deg | |diff| 0.1303
+   eps_eff from the S21 phase: 3.927 (Hammerstad-Jensen 3.332, +17.9 %)
+   PEC 11: rms E_t 6.34e-16  rms E 4.85e+00
+   PEC 12: rms E_t 1.67e-15  rms E 1.45e+01
+   Port1: V = 21.25777+0.31915j V, face area 4.9120 mm^2
+   Port2: V = -2.21588-24.49095j V, face area 4.9120 mm^2
+== P01-1_fine  f=1.0 GHz  NDOF=325979  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=0.244)
+   S11  FEM 0.0298 ( -30.51 dB)   178.43 deg | line 0.0015 ( -56.23 dB)  -177.68 deg | |diff| 0.0283
+   S21  FEM 0.9949 (  -0.04 dB)   -91.78 deg | line 0.9986 (  -0.01 dB)   -87.68 deg | |diff| 0.0714
+   eps_eff from the S21 phase: 3.651 (Hammerstad-Jensen 3.332, +9.6 %)
+   PEC 11: rms E_t 1.46e-16  rms E 4.54e+00
+   PEC 12: rms E_t 5.61e-16  rms E 1.84e+01
+   Port1: V = 24.25446+0.02045j V, face area 4.9120 mm^2
+   Port2: V = -0.77314-24.86096j V, face area 4.9120 mm^2
+== P01-1_sibc  f=1.0 GHz  NDOF=62398  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=0.244)
+   S11  FEM 0.0612 ( -24.27 dB)   178.24 deg | line 0.0015 ( -56.23 dB)  -177.68 deg | |diff| 0.0596
+   S21  FEM 0.9919 (  -0.07 dB)   -92.61 deg | line 0.9986 (  -0.01 dB)   -87.68 deg | |diff| 0.0859
+   eps_eff from the S21 phase: 3.718 (Hammerstad-Jensen 3.332, +11.6 %)
+   SIBC sigma=5.8e+07: P_c = 1.8515e-02 W (label 11 25 %, label 12 75 %); alpha_c FEM 0.324 dB/m | Pucel (t=0.035 mm) 0.275 dB/m, FEM/Pucel 1.18 | wide strip Rs/(Z0 w) 0.468 dB/m
+   |S21| SIBC - PEC = -0.01250 dB (conductor loss over L: FEM -0.01297 dB, Pucel -0.01100 dB)
+   Port1: V = 23.47158+0.04687j V, face area 4.9120 mm^2
+   Port2: V = -1.13048-24.77253j V, face area 4.9120 mm^2
+== P01-1_t  f=1.0 GHz  NDOF=316499  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=0.244)
+   S11  FEM 0.0216 ( -33.32 dB)   178.87 deg | line 0.0015 ( -56.23 dB)  -177.68 deg | |diff| 0.0200
+   S21  FEM 0.9952 (  -0.04 dB)   -91.22 deg | line 0.9986 (  -0.01 dB)   -87.68 deg | |diff| 0.0616
+   eps_eff from the S21 phase: 3.606 (Hammerstad-Jensen 3.332, +8.2 %)
+   PEC 11: rms E_t 1.42e-16  rms E 4.50e+00
+   PEC 12: rms E_t 9.38e-16  rms E 1.89e+01
+   Port1: V = 24.46092+0.01065j V, face area 4.9120 mm^2
+   Port2: V = -0.52833-24.87404j V, face area 4.9120 mm^2
+== P01-1_td0.02  f=1.0 GHz  NDOF=62398  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=0.244)
+   S11  FEM 0.0620 ( -24.15 dB)   169.92 deg | line 0.0015 ( -56.34 dB)  -177.71 deg | |diff| 0.0605
+   S21  FEM 0.9807 (  -0.17 dB)   -92.50 deg | line 0.9862 (  -0.12 dB)   -87.68 deg | |diff| 0.0829
+   eps_eff from the S21 phase: 3.709 (Hammerstad-Jensen 3.332, +11.3 %)
+   PEC 11: rms E_t 1.72e-16  rms E 4.56e+00
+   PEC 12: rms E_t 5.59e-16  rms E 1.65e+01
+   Port1: V = 23.47388+0.27139j V, face area 4.9120 mm^2
+   Port2: V = -1.06832-24.49476j V, face area 4.9120 mm^2
+== P01-1_td0  f=1.0 GHz  NDOF=62398  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=0.244)
+   S11  FEM 0.0623 ( -24.12 dB)   178.34 deg | line 0.0015 ( -56.22 dB)  -177.68 deg | |diff| 0.0607
+   S21  FEM 0.9948 (  -0.05 dB)   -92.53 deg | line 1.0000 (  -0.00 dB)   -87.68 deg | |diff| 0.0845
+   eps_eff from the S21 phase: 3.711 (Hammerstad-Jensen 3.332, +11.4 %)
+   PEC 11: rms E_t 1.74e-16  rms E 4.60e+00
+   PEC 12: rms E_t 5.65e-16  rms E 1.67e+01
+   Port1: V = 23.44438+0.04508j V, face area 4.9120 mm^2
+   Port2: V = -1.09627-24.84530j V, face area 4.9120 mm^2
+== P01-2_N20  f=10.0 GHz  NDOF=189737  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=2.436)
+   S11  FEM 0.1019 ( -19.84 dB)    43.32 deg | line 0.0006 ( -64.42 dB)   115.06 deg | |diff| 0.1017
+   S21  FEM 0.9023 (  -0.89 dB)   130.14 deg | line 0.9862 (  -0.12 dB)  -156.79 deg | |diff| 1.1263
+   eps_eff from the S21 phase: 3.910 (Hammerstad-Jensen 3.332, +17.3 %)
+   PEC 11: rms E_t 1.93e-16  rms E 4.77e+00
+   PEC 12: rms E_t 6.37e-16  rms E 1.68e+01
+   Port1: V = 26.85272+1.74704j V, face area 4.9120 mm^2
+   Port2: V = -14.54055+17.24425j V, face area 4.9120 mm^2
+== P01-2  f=10.0 GHz  NDOF=76723  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=2.436)
+   S11  FEM 0.1025 ( -19.79 dB)    43.56 deg | line 0.0006 ( -64.42 dB)   115.06 deg | |diff| 0.1023
+   S21  FEM 0.9020 (  -0.90 dB)   130.19 deg | line 0.9862 (  -0.12 dB)  -156.79 deg | |diff| 1.1255
+   eps_eff from the S21 phase: 3.909 (Hammerstad-Jensen 3.332, +17.3 %)
+   PEC 11: rms E_t 1.86e-16  rms E 4.76e+00
+   PEC 12: rms E_t 5.66e-16  rms E 1.68e+01
+   Port1: V = 26.85661+1.76565j V, face area 4.9120 mm^2
+   Port2: V = -14.55197+17.22646j V, face area 4.9120 mm^2
+== P01-2_sibc  f=10.0 GHz  NDOF=76723  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=2.436)
+   S11  FEM 0.1019 ( -19.84 dB)    43.44 deg | line 0.0006 ( -64.42 dB)   115.06 deg | |diff| 0.1017
+   S21  FEM 0.8976 (  -0.94 dB)   129.91 deg | line 0.9862 (  -0.12 dB)  -156.79 deg | |diff| 1.1267
+   eps_eff from the S21 phase: 3.912 (Hammerstad-Jensen 3.332, +17.4 %)
+   SIBC sigma=5.8e+07: P_c = 5.5140e-02 W (label 11 29 %, label 12 71 %); alpha_c FEM 1.061 dB/m | Pucel (t=0.035 mm) 0.870 dB/m, FEM/Pucel 1.22 | wide strip Rs/(Z0 w) 1.479 dB/m
+   |S21| SIBC - PEC = -0.04251 dB (conductor loss over L: FEM -0.04244 dB, Pucel -0.03479 dB)
+   Port1: V = 26.84892+1.75110j V, face area 4.9120 mm^2
+   Port2: V = -14.39761+17.21238j V, face area 4.9120 mm^2
+== P01-2_t  f=10.0 GHz  NDOF=330643  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=2.436)
+   S11  FEM 0.1325 ( -17.56 dB)    52.58 deg | line 0.0006 ( -64.42 dB)   115.06 deg | |diff| 0.1322
+   S21  FEM 0.9024 (  -0.89 dB)   142.94 deg | line 0.9862 (  -0.12 dB)  -156.79 deg | |diff| 0.9509
+   eps_eff from the S21 phase: 3.805 (Hammerstad-Jensen 3.332, +14.2 %)
+   PEC 11: rms E_t 1.45e-16  rms E 4.66e+00
+   PEC 12: rms E_t 8.48e-16  rms E 1.74e+01
+   Port1: V = 27.01233+2.62980j V, face area 4.9120 mm^2
+   Port2: V = -18.00166+13.59565j V, face area 4.9120 mm^2
+== P01-2_td0.02  f=10.0 GHz  NDOF=76723  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=2.436)
+   S11  FEM 0.0950 ( -20.45 dB)    50.82 deg | line 0.0006 ( -65.00 dB)   131.02 deg | |diff| 0.0949
+   S21  FEM 0.7822 (  -2.13 dB)   130.09 deg | line 0.8706 (  -1.20 dB)  -156.79 deg | |diff| 0.9870
+   eps_eff from the S21 phase: 3.910 (Hammerstad-Jensen 3.332, +17.4 %)
+   PEC 11: rms E_t 1.73e-16  rms E 4.44e+00
+   PEC 12: rms E_t 5.25e-16  rms E 1.57e+01
+   Port1: V = 26.50035+1.84113j V, face area 4.9120 mm^2
+   Port2: V = -12.59340+14.95944j V, face area 4.9120 mm^2
+== P01-2_td0  f=10.0 GHz  NDOF=76723  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=2.436)
+   S11  FEM 0.1036 ( -19.69 dB)    42.71 deg | line 0.0006 ( -64.30 dB)   113.21 deg | |diff| 0.1034
+   S21  FEM 0.9164 (  -0.76 dB)   130.20 deg | line 1.0000 (  -0.00 dB)  -156.79 deg | |diff| 1.1421
+   eps_eff from the S21 phase: 3.909 (Hammerstad-Jensen 3.332, +17.3 %)
+   PEC 11: rms E_t 1.87e-16  rms E 4.80e+00
+   PEC 12: rms E_t 5.71e-16  rms E 1.69e+01
+   Port1: V = 26.90402+1.75734j V, face area 4.9120 mm^2
+   Port2: V = -14.78700+17.49911j V, face area 4.9120 mm^2
+== P01-3  f=0.1 GHz  NDOF=62398  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=0.024)
+   S11  FEM 0.0076 ( -42.38 dB)  -100.27 deg | line 0.0002 ( -72.55 dB)   -98.82 deg | |diff| 0.0074
+   S21  FEM 0.9998 (  -0.00 dB)    -9.26 deg | line 0.9999 (  -0.00 dB)    -8.77 deg | |diff| 0.0087
+   eps_eff from the S21 phase: 3.709 (Hammerstad-Jensen 3.332, +11.3 %)
+   PEC 11: rms E_t 1.77e-16  rms E 4.71e+00
+   PEC 12: rms E_t 5.79e-16  rms E 1.71e+01
+   Port1: V = 24.96610-0.18701j V, face area 4.9120 mm^2
+   Port2: V = 24.66855-4.02381j V, face area 4.9120 mm^2
+== P01-a_f0.5  f=0.5 GHz  NDOF=62398  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=0.122)
+   S11  FEM 0.0363 ( -28.80 dB)  -136.83 deg | line 0.0011 ( -59.41 dB)  -133.88 deg | |diff| 0.0352
+   S21  FEM 0.9977 (  -0.02 dB)   -46.30 deg | line 0.9993 (  -0.01 dB)   -43.84 deg | |diff| 0.0430
+   eps_eff from the S21 phase: 3.710 (Hammerstad-Jensen 3.332, +11.3 %)
+   PEC 11: rms E_t 1.76e-16  rms E 4.68e+00
+   PEC 12: rms E_t 5.74e-16  rms E 1.70e+01
+   Port1: V = 24.33793-0.62113j V, face area 4.9120 mm^2
+   Port2: V = 17.23096-18.03294j V, face area 4.9120 mm^2
+== P01-a_f20  f=20.0 GHz  NDOF=189737  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=4.871)
+   S11  FEM 0.1440 ( -16.83 dB)    36.41 deg | line 0.0011 ( -59.25 dB)   137.93 deg | |diff| 0.1443
+   S21  FEM 0.7011 (  -3.08 dB)  -149.82 deg | line 0.9727 (  -0.24 dB)    46.42 deg | |diff| 1.6574
+   eps_eff from the S21 phase: 4.120 (Hammerstad-Jensen 3.332, +23.7 %)
+   PEC 11: rms E_t 1.86e-16  rms E 4.57e+00
+   PEC 12: rms E_t 5.78e-16  rms E 1.56e+01
+   Port1: V = 27.89777+2.13747j V, face area 4.9120 mm^2
+   Port2: V = -15.15133-8.81180j V, face area 4.9120 mm^2
+== P01-a_f2  f=2.0 GHz  NDOF=62398  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=0.487)
+   S11  FEM 0.0467 ( -26.62 dB)    84.86 deg | line 0.0001 ( -78.07 dB)    96.60 deg | |diff| 0.0466
+   S21  FEM 0.9874 (  -0.11 dB)   175.02 deg | line 0.9972 (  -0.02 dB)  -175.36 deg | |diff| 0.1667
+   eps_eff from the S21 phase: 3.707 (Hammerstad-Jensen 3.332, +11.3 %)
+   PEC 11: rms E_t 1.73e-16  rms E 4.58e+00
+   PEC 12: rms E_t 5.63e-16  rms E 1.66e+01
+   Port1: V = 25.10445+1.16218j V, face area 4.9120 mm^2
+   Port2: V = -24.59318+2.14125j V, face area 4.9120 mm^2
+== P01-a_f5  f=5.0 GHz  NDOF=63524  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=1.218)
+   S11  FEM 0.0439 ( -27.15 dB)   161.35 deg | line 0.0015 ( -56.45 dB)  -168.48 deg | |diff| 0.0426
+   S21  FEM 0.9629 (  -0.33 dB)  -106.69 deg | line 0.9931 (  -0.06 dB)   -78.39 deg | |diff| 0.4790
+   eps_eff from the S21 phase: 3.777 (Hammerstad-Jensen 3.332, +13.3 %)
+   PEC 11: rms E_t 1.85e-16  rms E 4.70e+00
+   PEC 12: rms E_t 6.76e-16  rms E 1.69e+01
+   Port1: V = 23.95960+0.35114j V, face area 4.9120 mm^2
+   Port2: V = -6.91442-23.05745j V, face area 4.9120 mm^2
+== P01-b_L131.4  f=10.0 GHz  NDOF=225703  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=8.001)
+   S11  FEM 0.1181 ( -18.56 dB)    72.76 deg | line 0.0001 ( -83.40 dB)  -174.69 deg | |diff| 0.1181
+   S21  FEM 0.8679 (  -1.23 dB)   165.32 deg | line 0.9555 (  -0.40 dB)    -0.25 deg | |diff| 1.8090
+   eps_eff from the S21 phase: 3.797 (Hammerstad-Jensen 3.332, +14.0 %)
+   PEC 11: rms E_t 1.70e-16  rms E 4.69e+00
+   PEC 12: rms E_t 5.90e-16  rms E 1.66e+01
+   Port1: V = 25.87496+2.81897j V, face area 4.9120 mm^2
+   Port2: V = -20.98858+5.49765j V, face area 4.9120 mm^2
+== P01-b_L16.4  f=10.0 GHz  NDOF=38558  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=0.999)
+   S11  FEM 0.1075 ( -19.37 dB)    52.24 deg | line 0.0000 ( -95.71 dB)   122.76 deg | |diff| 0.1075
+   S21  FEM 0.9038 (  -0.88 dB)   -41.74 deg | line 0.9943 (  -0.05 dB)     0.52 deg | |diff| 0.6894
+   eps_eff from the S21 phase: 4.158 (Hammerstad-Jensen 3.332, +24.8 %)
+   PEC 11: rms E_t 2.13e-16  rms E 4.72e+00
+   PEC 12: rms E_t 4.51e-16  rms E 1.66e+01
+   Port1: V = 26.64644+2.12541j V, face area 4.9120 mm^2
+   Port2: V = 16.86146-15.04264j V, face area 4.9120 mm^2
+== P01-b_L32.9  f=10.0 GHz  NDOF=65812  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=2.003)
+   S11  FEM 0.0687 ( -23.26 dB)    37.17 deg | line 0.0000 ( -88.99 dB)  -120.55 deg | |diff| 0.0687
+   S21  FEM 0.9118 (  -0.80 dB)   -65.46 deg | line 0.9887 (  -0.10 dB)    -1.16 deg | |diff| 1.0134
+   eps_eff from the S21 phase: 3.952 (Hammerstad-Jensen 3.332, +18.6 %)
+   PEC 11: rms E_t 1.99e-16  rms E 4.79e+00
+   PEC 12: rms E_t 6.70e-16  rms E 1.69e+01
+   Port1: V = 26.36868+1.03792j V, face area 4.9120 mm^2
+   Port2: V = 9.46676-20.73511j V, face area 4.9120 mm^2
+== P01-b_L65.7  f=10.0 GHz  NDOF=118977  status=converged  (line: Z0=49.92 Ohm, eps_eff=3.332, L/lambda_g=4.000)
+   S11  FEM 0.0339 ( -29.41 dB)   103.64 deg | line 0.0000 ( -89.22 dB)  -174.56 deg | |diff| 0.0338
+   S21  FEM 0.8970 (  -0.94 dB)  -107.92 deg | line 0.9775 (  -0.20 dB)    -0.13 deg | |diff| 1.5153
+   eps_eff from the S21 phase: 3.850 (Hammerstad-Jensen 3.332, +15.5 %)
+   PEC 11: rms E_t 1.74e-16  rms E 4.77e+00
+   PEC 12: rms E_t 6.29e-16  rms E 1.69e+01
+   Port1: V = 24.80048+0.82240j V, face area 4.9120 mm^2
+   Port2: V = -6.90105-21.33568j V, face area 4.9120 mm^2

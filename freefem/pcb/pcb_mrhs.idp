@@ -1,0 +1,50 @@
+// Multiple right-hand sides (pcb_problem_benchmark_settings.md 12.2; handoff
+// task H1): all lumped ports of the problem are excited one after the other
+// (one right-hand side per port, E2) in ONE solver process, so that the
+// matrix assembly and the preconditioner set-up are done once.
+//
+// mrhsMethod (pcb_case_config.idp):
+//   ""        off: one right-hand side (excitedPort), the standard solve
+//   "shared"  the right-hand sides solved one after the other with the outer
+//             method of the combination (hand-rolled GMRES or COCG, or the
+//             PETSc KSP, e.g. MUMPS with the factorization reused); only the
+//             set-up is shared
+//   "block"   block flexible GMRES on all right-hand sides together
+//             (pcb_mrhs_block.idp; hand-rolled GMRES combinations only)
+//   "gcro"    recycled flexible GMRES (GCRO-DR type, pcb_mrhs_seq.idp): after
+//             each right-hand side, mrhsRecycle harmonic Ritz vectors of the
+//             last cycle are added to a recycle space (at most
+//             mrhsRecycleMax vectors) that the next solves deflate
+//             (hand-rolled GMRES combinations only)
+//
+// Requires (caller): Eh, lPort and the port arrays of pcb_port.idp, and, in
+// the solver branch where runMrhs is expanded, func matvec / func precon (or
+// the PETSc matrix A of the KSP branch, see maxwell_pcb_solver.edp).
+//
+// Output: "<n> KSP Residual norm <relres>" lines with n = cumulative number
+// of matrix-vector products (= preconditioner applications) and relres the
+// relative residual of the right-hand side being solved (block: the largest
+// over the right-hand sides), so run_benchmark.run_job parses one history
+// starting at 1; per right-hand side "MRHS_DONE <port> <iterations> <time>
+// <relres> <converged>"; the port voltages / S columns of every right-hand
+// side after the timed phases (maxwell_pcb_solver.edp).
+
+load "lapack"                      // zgeev, inv (harmonic Ritz vectors of method gcro)
+
+complex[int][int] mrhsX(1);        // solutions, one per port (resized in pcb_mrhs_rhs.idp)
+complex[int][int] mrhsB(1);        // right-hand sides, one per port
+real[int] mrhsBnorm(1);
+int mrhsNrhs = 0;
+int mrhsMv = 0;                    // matrix-vector products so far
+int mrhsAllConv = 1;
+
+// hand-rolled outer methods (func matvec / func precon defined by the branch)
+macro runMrhs()
+  include "pcb_mrhs_rhs.idp"
+  include "pcb_mrhs_solve.idp"
+// EOM
+// PETSc KSP branch (Mat<complex> A with its KSP options, e.g. MUMPS)
+macro runMrhsKsp()
+  include "pcb_mrhs_rhs.idp"
+  include "pcb_mrhs_ksp.idp"
+// EOM

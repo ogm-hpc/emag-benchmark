@@ -1,0 +1,634 @@
+{
+  "case1A": {
+    "description": "PEC sphere scattering with 6-directional anisotropic UPML (PEC-backed). lambda0 = 1 (k0 = 2*pi) for every set; k0R = 2*pi*R.",
+    "template": "case1A_pec_sphere_scattering.geo",
+    "parameter_sets": {
+      "standard": {
+        "description": "k0R = pi (R = 0.5), core L = 2, tPML = 0.5, lc = lambda0/8",
+        "lambda0": 1.0,
+        "L": 2.0,
+        "R": 0.5,
+        "tPML": 0.5,
+        "k0R": 3.141592654,
+        "lc": 0.125,
+        "suite": "core"
+      },
+      "high_freq": {
+        "description": "Electrically larger sphere k0R = 1.5*pi (R = 0.75), core L = 2.5 (same 0.5 air gap), tPML = 0.5",
+        "lambda0": 1.0,
+        "L": 2.5,
+        "R": 0.75,
+        "tPML": 0.5,
+        "k0R": 4.71238898,
+        "lc": 0.125,
+        "suite": "extended"
+      },
+      "thick_pml": {
+        "description": "As standard with a thick PML tPML = 0.75",
+        "lambda0": 1.0,
+        "L": 2.0,
+        "R": 0.5,
+        "tPML": 0.75,
+        "k0R": 3.141592654,
+        "lc": 0.125,
+        "suite": "extended"
+      },
+      "thin_pml": {
+        "description": "As standard with a thin PML tPML = 0.25",
+        "lambda0": 1.0,
+        "L": 2.0,
+        "R": 0.5,
+        "tPML": 0.25,
+        "k0R": 3.141592654,
+        "lc": 0.125,
+        "suite": "extended"
+      }
+    }
+  },
+  "case1B": {
+    "description": "High-permittivity sphere Mie scattering with anisotropic UPML. lambda0 = 1, R = 0.3 (k0R = 1.885), core L = 1.6, tPML = 0.5; sphere meshed at lambda0/sqrt(eps)/8.",
+    "template": "case1B_high_eps_sphere_mie.geo",
+    "parameter_sets": {
+      "mie_low_eps": {
+        "description": "eps_r = 4 (k0R*sqrt(eps) = 3.8)",
+        "lambda0": 1.0,
+        "L": 1.6,
+        "R": 0.3,
+        "tPML": 0.5,
+        "epsSphere": 4.0,
+        "k0R": 1.884955592,
+        "lcSphere": 0.0625,
+        "lcAir": 0.125,
+        "suite": "extended"
+      },
+      "mie_mid_eps": {
+        "description": "eps_r = 10 (k0R*sqrt(eps) = 6.0)",
+        "lambda0": 1.0,
+        "L": 1.6,
+        "R": 0.3,
+        "tPML": 0.5,
+        "epsSphere": 10.0,
+        "k0R": 1.884955592,
+        "lcSphere": 0.0395,
+        "lcAir": 0.125,
+        "suite": "extended"
+      },
+      "mie_high_eps": {
+        "description": "eps_r = 15 (k0R*sqrt(eps) = 7.3)",
+        "lambda0": 1.0,
+        "L": 1.6,
+        "R": 0.3,
+        "tPML": 0.5,
+        "epsSphere": 15.0,
+        "k0R": 1.884955592,
+        "lcSphere": 0.0323,
+        "lcAir": 0.125,
+        "suite": "challenge",
+        "suiteBeforeV1": "extended",
+        "suiteReason": "v1.0 tier (2026-10-14, papers/paper2): at most 2 of the 11 standard combinations converge in the v1.0 records (M3 Pro)"
+      },
+      "mie_ultra_high_eps": {
+        "description": "eps_r = 25 (k0R*sqrt(eps) = 9.4) k0 raised by 1% (k0 = 6.3460): at k0 = 2*pi it sat on a cluster of nearly degenerate high-Q Mie modes (nearest < 0.01%); nearest mode now 0.86% away (resonance_check.py, 2026-09-28).",
+        "lambda0": 1.0,
+        "L": 1.6,
+        "R": 0.3,
+        "tPML": 0.5,
+        "epsSphere": 25.0,
+        "k0R": 1.903805148,
+        "lcSphere": 0.025,
+        "lcAir": 0.125,
+        "suite": "challenge",
+        "suiteBeforeV1": "extended",
+        "suiteReason": "v1.0 tier (2026-10-14, papers/paper2): at most 2 of the 11 standard combinations converge in the v1.0 records (M3 Pro)"
+      }
+    }
+  },
+  "case1C": {
+    "description": "Aperture-coupled two-chamber scatterer (PEC septum with a w x w duct) with anisotropic UPML. Chambers Lc = 1.5, tPML = 0.5, lc = lambda0/8.",
+    "template": "case1C_aperture_cavity_scattering.geo",
+    "parameter_sets": {
+      "narrow_aperture": {
+        "description": "Narrow aperture w = 0.1*lambda0",
+        "lambda0": 1.0,
+        "Lc": 1.5,
+        "w": 0.1,
+        "tSep": 0.1,
+        "tPML": 0.5,
+        "lc": 0.125,
+        "suite": "extended"
+      },
+      "medium_aperture": {
+        "description": "Medium aperture w = 0.2*lambda0",
+        "lambda0": 1.0,
+        "Lc": 1.5,
+        "w": 0.2,
+        "tSep": 0.1,
+        "tPML": 0.5,
+        "lc": 0.125,
+        "suite": "extended"
+      },
+      "wide_aperture": {
+        "description": "Wide aperture w = 0.5*lambda0",
+        "lambda0": 1.0,
+        "Lc": 1.5,
+        "w": 0.5,
+        "tSep": 0.1,
+        "tPML": 0.5,
+        "lc": 0.125,
+        "suite": "extended"
+      }
+    }
+  },
+  "case2A": {
+    "description": "Empty PEC cavity 4 x 2 x 2 (mesh unchanged: lc = 0.1, PPW 7.6, 92k DOF)",
+    "template": "case2A_empty_pec_cavity.geo",
+    "parameter_sets": {
+      "standard": {
+        "description": "k0 = 2*pi, 0.8% from the (5,3,1) box mode k = 6.332 (near-resonant)",
+        "lambda0": 1.0,
+        "Lx": 4.0,
+        "Ly": 2.0,
+        "Lz": 2.0,
+        "lc": 0.1,
+        "suite": "core"
+      },
+      "off_resonance": {
+        "description": "Same mesh as standard, k0 = 2.0: in the gap between the (1,1,0) mode (k = 1.756) and the (0,1,1) mode (k = 2.221)",
+        "lambda0": 3.14159265358979,
+        "Lx": 4.0,
+        "Ly": 2.0,
+        "Lz": 2.0,
+        "lc": 0.1,
+        "suite": "core"
+      }
+    }
+  },
+  "case2B": {
+    "description": "Two 2x2x2 chambers coupled through a w x w iris in a PEC wall of thickness th (geometry fixed 2026-09-28: the chambers used to be disconnected). lc = 0.13.",
+    "template": "case2B_two_chamber_iris.geo",
+    "parameter_sets": {
+      "narrow_iris": {
+        "description": "Narrow iris w = 0.02*lambda0",
+        "lambda0": 1.0,
+        "Lch": 2.0,
+        "w": 0.02,
+        "th": 0.1,
+        "lc": 0.13,
+        "suite": "extended"
+      },
+      "medium_iris": {
+        "description": "Medium iris w = 0.1*lambda0",
+        "lambda0": 1.0,
+        "Lch": 2.0,
+        "w": 0.1,
+        "th": 0.1,
+        "lc": 0.13,
+        "suite": "extended"
+      },
+      "wide_iris": {
+        "description": "Wide iris w = 0.5*lambda0",
+        "lambda0": 1.0,
+        "Lch": 2.0,
+        "w": 0.5,
+        "th": 0.1,
+        "lc": 0.13,
+        "suite": "extended"
+      },
+      "off_resonance": {
+        "description": "Geometry of medium_iris, k0 = 4.15: gap between the single-chamber (2,1,1) mode (k = 3.85) and (2,2,0) mode (k = 4.44); k0 = 2*pi of the other sets is ~3% from the degenerate chamber-mode cluster at k = 6.49",
+        "lambda0": 1.51402,
+        "Lch": 2.0,
+        "w": 0.1,
+        "th": 0.1,
+        "lc": 0.13,
+        "suite": "extended"
+      }
+    }
+  },
+  "case2C": {
+    "description": "Two 2x2x2 chambers coupled through a g x hSlit slit in a PEC plate; lcFar = 0.13, lcNear = g/2.",
+    "template": "case2C_ultra_narrow_slit.geo",
+    "parameter_sets": {
+      "narrow_slit": {
+        "description": "Narrow slit g = lambda0/100",
+        "lambda0": 1.0,
+        "L": 2.0,
+        "tPlate": 0.05,
+        "g": 0.01,
+        "hSlit": 0.4,
+        "lcFar": 0.13,
+        "lcNear": 0.005,
+        "suite": "extended"
+      },
+      "medium_slit": {
+        "description": "Medium slit g = lambda0/50",
+        "lambda0": 1.0,
+        "L": 2.0,
+        "tPlate": 0.05,
+        "g": 0.02,
+        "hSlit": 0.4,
+        "lcFar": 0.13,
+        "lcNear": 0.01,
+        "suite": "extended"
+      },
+      "wide_slit": {
+        "description": "Wide slit g = lambda0/20",
+        "lambda0": 1.0,
+        "L": 2.0,
+        "tPlate": 0.05,
+        "g": 0.05,
+        "hSlit": 0.4,
+        "lcFar": 0.13,
+        "lcNear": 0.025,
+        "suite": "extended"
+      },
+      "off_resonance": {
+        "description": "Geometry of medium_slit, k0 = 4.15 (same off-resonance gap as case2B)",
+        "lambda0": 1.51402,
+        "L": 2.0,
+        "tPlate": 0.05,
+        "g": 0.02,
+        "hSlit": 0.4,
+        "lcFar": 0.13,
+        "lcNear": 0.01,
+        "suite": "extended"
+      }
+    }
+  },
+  "case2D": {
+    "description": "Maze-like cavity 8 x 2 x 2 with Nwall internal PEC wall pairs (thickness 0.03), lc = 0.13",
+    "template": "case2D_maze_cavity.geo",
+    "parameter_sets": {
+      "few_walls": {
+        "description": "Nwall = 5, opening 5%",
+        "lambda0": 1.0,
+        "Lx": 8.0,
+        "Ly": 2.0,
+        "Lz": 2.0,
+        "Nwall": 5,
+        "ropen": 0.05,
+        "th": 0.03,
+        "lc": 0.13,
+        "suite": "extended"
+      },
+      "many_walls": {
+        "description": "Nwall = 20, opening 20% (lc = 0.145: the 40 wall slabs refine the mesh locally)",
+        "lambda0": 1.0,
+        "Lx": 8.0,
+        "Ly": 2.0,
+        "Lz": 2.0,
+        "Nwall": 20,
+        "ropen": 0.2,
+        "th": 0.03,
+        "lc": 0.145,
+        "suite": "extended"
+      },
+      "off_resonance": {
+        "description": "Geometry of few_walls, k0 = 2.09: gap between the empty-box (3,1,0) mode (k = 1.96) and (0,1,1)/(4,1,0) modes (k = 2.22); lower-confidence off-resonance point (dense axial spectrum of the Lx = 8 box)",
+        "lambda0": 3.006309,
+        "Lx": 8.0,
+        "Ly": 2.0,
+        "Lz": 2.0,
+        "Nwall": 5,
+        "ropen": 0.05,
+        "th": 0.03,
+        "lc": 0.13,
+        "suite": "extended"
+      }
+    }
+  },
+  "case2E": {
+    "description": "Iris-loaded rectangular waveguide a x b x L = 1 x 0.5 x 10 (PEC PortIn, Silver-Mueller PortOut), lc = 0.13",
+    "template": "case2E_iris_waveguide.geo",
+    "parameter_sets": {
+      "sparse_irises": {
+        "description": "N = 5 irises, period p = 1.0*lambda0",
+        "lambda0": 1.0,
+        "a": 1.0,
+        "b": 0.5,
+        "L": 10.0,
+        "p": 1.0,
+        "N": 5,
+        "tI": 0.03,
+        "bI": 0.1,
+        "lc": 0.13,
+        "suite": "extended"
+      },
+      "dense_irises": {
+        "description": "N = 20 irises, period p = 0.5*lambda0",
+        "lambda0": 1.0,
+        "a": 1.0,
+        "b": 0.5,
+        "L": 10.0,
+        "p": 0.5,
+        "N": 20,
+        "tI": 0.03,
+        "bI": 0.1,
+        "lc": 0.13,
+        "suite": "extended"
+      }
+    }
+  },
+  "case2F": {
+    "description": "TEAM Workshop Problem 19: waveguide-fed cylindrical cavity with dielectric rod (Bossavit, Lamaudiere, Maestrali, EdF 1992; https://www.compumag.org/jsite/images/stories/TEAM/problem19.pdf). Real millimeter geometry: 86.36x43.18mm waveguide feeding a 90mm-diameter cylindrical cavity through a 15mm iris, optional dielectric rod on the axis. lambda0 = wavelength at each loading's measured resonance (paper Fig. 5). Mesh unchanged (PPW ~7, lcRod = rodR/3). Since 2026-09-28 the rod gets its real permittivity epsLossy (it was left at eps_r = 1 before).",
+    "template": "case2F_team19_loaded_cavity.geo",
+    "parameter_sets": {
+      "empty": {
+        "description": "Empty cavity (no rod), f0 = 2541 MHz",
+        "lambda0": 117.982,
+        "aWg": 86.36,
+        "bWg": 43.18,
+        "Lwg": 150.0,
+        "Rcav": 45.0,
+        "Hcav": 85.0,
+        "irisWidth": 15.0,
+        "rodR": 0.0,
+        "epsLossy": 1.0,
+        "tanDelta": 0.0,
+        "chGap": 4.0,
+        "chPen": 6.0,
+        "suite": "extended"
+      },
+      "plex7": {
+        "description": "Plexiglas rod eps_r = 2.7 - 0.01i, diameter 7mm, f0 = 2490 MHz",
+        "lambda0": 120.3986,
+        "aWg": 86.36,
+        "bWg": 43.18,
+        "Lwg": 150.0,
+        "Rcav": 45.0,
+        "Hcav": 85.0,
+        "irisWidth": 15.0,
+        "rodR": 3.5,
+        "epsLossy": 2.7,
+        "tanDelta": 0.0037037,
+        "chGap": 4.0,
+        "chPen": 6.0,
+        "suite": "extended"
+      },
+      "plex9": {
+        "description": "Plexiglas rod eps_r = 2.7 - 0.01i, diameter 9mm, f0 = 2462 MHz",
+        "lambda0": 121.7678,
+        "aWg": 86.36,
+        "bWg": 43.18,
+        "Lwg": 150.0,
+        "Rcav": 45.0,
+        "Hcav": 85.0,
+        "irisWidth": 15.0,
+        "rodR": 4.5,
+        "epsLossy": 2.7,
+        "tanDelta": 0.0037037,
+        "chGap": 4.0,
+        "chPen": 6.0,
+        "suite": "extended"
+      },
+      "pvc7": {
+        "description": "PVC rod eps_r = 4.0 - 0.1i, diameter 7mm, f0 = 2482 MHz",
+        "lambda0": 120.7867,
+        "aWg": 86.36,
+        "bWg": 43.18,
+        "Lwg": 150.0,
+        "Rcav": 45.0,
+        "Hcav": 85.0,
+        "irisWidth": 15.0,
+        "rodR": 3.5,
+        "epsLossy": 4.0,
+        "tanDelta": 0.025,
+        "chGap": 4.0,
+        "chPen": 6.0,
+        "suite": "extended"
+      },
+      "pvc9": {
+        "description": "PVC rod eps_r = 4.0 - 0.1i, diameter 9mm, f0 = 2446 MHz",
+        "lambda0": 122.5645,
+        "aWg": 86.36,
+        "bWg": 43.18,
+        "Lwg": 150.0,
+        "Rcav": 45.0,
+        "Hcav": 85.0,
+        "irisWidth": 15.0,
+        "rodR": 4.5,
+        "epsLossy": 4.0,
+        "tanDelta": 0.025,
+        "chGap": 4.0,
+        "chPen": 6.0,
+        "suite": "extended"
+      }
+    }
+  },
+  "case3A": {
+    "description": "Two-layer PEC cavity 0.4^3 (lower half air, upper half eps = kappa). One common mesh for all sets, sized for kappa = 100. (freq_perturb_a/b removed: frequency probes of the old 2*lambda0 geometry.)",
+    "template": "case3A_two_layer_dielectric_cavity.geo",
+    "parameter_sets": {
+      "low_contrast": {
+        "description": "kappa = 2",
+        "lambda0": 1.0,
+        "Lx": 0.4,
+        "Ly": 0.4,
+        "Lz": 0.4,
+        "kappa": 2.0,
+        "lcLayer2": 0.0125,
+        "lcLayer1": 0.125,
+        "suite": "extended"
+      },
+      "high_contrast": {
+        "description": "kappa = 100 Operating point moved off an accidental resonance (nearest mode 0.05% from k0 = 2*pi) to the center of the widest nearby mode gap: k0 = 6.23631 (-0.75%), nearest mode now 0.33% away (resonance_check.py, 2026-09-28).",
+        "lambda0": 1.0,
+        "Lx": 0.4,
+        "Ly": 0.4,
+        "Lz": 0.4,
+        "kappa": 100.0,
+        "lcLayer2": 0.0125,
+        "lcLayer1": 0.125,
+        "k0": 6.23631,
+        "suite": "core"
+      }
+    }
+  },
+  "case3B": {
+    "description": "Multilayer PEC cavity 1.2^3, Nlayer z-slabs cycling Air / PTFE (2.1) / Alumina (9.8); each layer meshed at lambda0/sqrt(eps)/8, capped by the layer thickness.",
+    "template": "case3B_multilayer_dielectric.geo",
+    "parameter_sets": {
+      "few_layers": {
+        "description": "Nlayer = 6 (layer thickness 0.2)",
+        "lambda0": 1.0,
+        "Lx": 1.2,
+        "Ly": 1.2,
+        "Lz": 1.2,
+        "Nlayer": 6,
+        "lcAir": 0.125,
+        "lcPTFE": 0.0863,
+        "lcAlumina": 0.0399,
+        "suite": "extended"
+      },
+      "many_layers": {
+        "description": "Nlayer = 15 (layer thickness 0.08) Operating point moved off an accidental resonance (nearest mode 0.20% from k0 = 2*pi) to the center of the widest nearby mode gap: k0 = 6.24507 (-0.61%), nearest mode now 0.30% away (resonance_check.py, 2026-09-28).",
+        "lambda0": 1.0,
+        "Lx": 1.2,
+        "Ly": 1.2,
+        "Lz": 1.2,
+        "Nlayer": 15,
+        "lcAir": 0.125,
+        "lcPTFE": 0.0863,
+        "lcAlumina": 0.0399,
+        "k0": 6.24507,
+        "suite": "extended"
+      }
+    }
+  },
+  "case3C": {
+    "description": "3D checkerboard of eps = 1 / 100 cells in a PEC cavity 0.32^3; Eps100 cells at lambda0/10/8 (in a checkerboard every Eps1 face touches Eps100, so the mesh is nearly uniformly fine).",
+    "template": "case3C_checkerboard.geo",
+    "parameter_sets": {
+      "coarse_check": {
+        "description": "Nc = 4 (cell 0.080 = 0.80 local wavelengths in Eps100) Operating point moved off an accidental resonance (nearest mode 0.02% from k0 = 2*pi) to the center of the widest nearby mode gap: k0 = 6.23316 (-0.80%), nearest mode now 0.82% away (resonance_check.py, 2026-09-28).",
+        "lambda0": 1.0,
+        "L": 0.32,
+        "Nc": 4,
+        "lcFine": 0.0125,
+        "lcCoarse": 0.125,
+        "k0": 6.23316,
+        "suite": "extended"
+      },
+      "medium_check": {
+        "description": "Nc = 6 (cell 0.053 = 0.53 local wavelengths in Eps100)",
+        "lambda0": 1.0,
+        "L": 0.32,
+        "Nc": 6,
+        "lcFine": 0.0139,
+        "lcCoarse": 0.125,
+        "suite": "extended"
+      },
+      "fine_check": {
+        "description": "Nc = 8 (cell 0.040 = 0.40 local wavelengths in Eps100)",
+        "lambda0": 1.0,
+        "L": 0.32,
+        "Nc": 8,
+        "lcFine": 0.0162,
+        "lcCoarse": 0.125,
+        "suite": "extended"
+      }
+    }
+  },
+  "case3D": {
+    "description": "Array of eps = 50 rods (R = 0.032, pitch 0.08, height 0.16, margin 0.08; 0.16x scale of the original design) in a PEC box; rods at lambda0/sqrt(50)/8.",
+    "template": "case3D_high_eps_rod_array.geo",
+    "parameter_sets": {
+      "sparse_array": {
+        "description": "5 x 5 rods",
+        "lambda0": 1.0,
+        "R": 0.032,
+        "p": 0.08,
+        "Nx": 5,
+        "Ny": 5,
+        "Hz": 0.16,
+        "margin": 0.08,
+        "epsRods": 50.0,
+        "lcRod": 0.0185,
+        "lcAir": 0.125,
+        "suite": "extended"
+      },
+      "dense_array": {
+        "description": "10 x 10 rods Operating point moved off an accidental resonance (nearest mode 0.01% from k0 = 2*pi) to the center of the widest nearby mode gap: k0 = 6.31553 (+0.51%), nearest mode now 0.40% away (resonance_check.py, 2026-09-28).",
+        "lambda0": 1.0,
+        "R": 0.032,
+        "p": 0.08,
+        "Nx": 10,
+        "Ny": 10,
+        "Hz": 0.16,
+        "margin": 0.08,
+        "epsRods": 50.0,
+        "lcRod": 0.0185,
+        "lcAir": 0.125,
+        "k0": 6.31553,
+        "suite": "extended"
+      }
+    }
+  },
+  "case3E": {
+    "description": "Lossy inclusion (0.8^3, eps = 10*(1 - i tan(delta))) in a 2^3 PEC cavity; one common graded mesh (inclusion lambda0/sqrt(10)/8, air lambda0/8).",
+    "template": "case3E_lossy_inclusion_cavity.geo",
+    "parameter_sets": {
+      "low_loss": {
+        "description": "tan(delta) = 0.01",
+        "lambda0": 1.0,
+        "L": 2.0,
+        "Lin": 0.8,
+        "epsLossy": 10.0,
+        "tanDelta": 0.01,
+        "lcIn": 0.0395,
+        "lcAir": 0.125,
+        "suite": "extended"
+      },
+      "medium_loss": {
+        "description": "tan(delta) = 0.1",
+        "lambda0": 1.0,
+        "L": 2.0,
+        "Lin": 0.8,
+        "epsLossy": 10.0,
+        "tanDelta": 0.1,
+        "lcIn": 0.0395,
+        "lcAir": 0.125,
+        "suite": "extended"
+      },
+      "high_loss": {
+        "description": "tan(delta) = 1.0",
+        "lambda0": 1.0,
+        "L": 2.0,
+        "Lin": 0.8,
+        "epsLossy": 10.0,
+        "tanDelta": 1.0,
+        "lcIn": 0.0395,
+        "lcAir": 0.125,
+        "suite": "extended"
+      }
+    }
+  },
+  "case3F": {
+    "description": "Mosaic of 6^3 cells (Air / PTFE 2.1 / Alumina 9.8 / HighK kappa / Lossy 10*(1 - i tan(delta))) in a 0.32^3 PEC cavity; the first floor(vloss*216) cells are lossy. Common sizing for all sets (kappaMesh = 150, vlossMesh = 0.2).",
+    "template": "case3F_mosaic_material_cavity.geo",
+    "parameter_sets": {
+      "low_contrast_no_loss": {
+        "description": "kappa = 10, no lossy cells",
+        "lambda0": 1.0,
+        "L": 0.32,
+        "Nx": 6,
+        "Ny": 6,
+        "Nz": 6,
+        "kappa": 10.0,
+        "vloss": 0.0,
+        "epsLossy": 10.0,
+        "tanDelta": 0.0,
+        "lcHighK": 0.0108,
+        "suite": "extended"
+      },
+      "high_contrast_with_loss": {
+        "description": "kappa = 100, 10% lossy cells with tan(delta) = 0.1",
+        "lambda0": 1.0,
+        "L": 0.32,
+        "Nx": 6,
+        "Ny": 6,
+        "Nz": 6,
+        "kappa": 100.0,
+        "vloss": 0.1,
+        "epsLossy": 10.0,
+        "tanDelta": 0.1,
+        "lcHighK": 0.0108,
+        "suite": "extended"
+      },
+      "ultra_contrast_high_loss": {
+        "description": "kappa = 150, 20% lossy cells with tan(delta) = 0.2",
+        "lambda0": 1.0,
+        "L": 0.32,
+        "Nx": 6,
+        "Ny": 6,
+        "Nz": 6,
+        "kappa": 150.0,
+        "vloss": 0.2,
+        "epsLossy": 10.0,
+        "tanDelta": 0.2,
+        "lcHighK": 0.0108,
+        "suite": "extended"
+      }
+    }
+  }
+}

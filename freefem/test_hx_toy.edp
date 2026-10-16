@@ -1,0 +1,159 @@
+// Validate the 2-term HX preconditioner (hx_precon.idp) on a small real
+// Edge03d mesh (G only makes sense against genuine mesh edge/node topology,
+// unlike accel_ic's hand-built sparse toy matrices).
+//
+// Test A (decisive): a manufactured solution that is EXACTLY a discrete
+// gradient (Etrue = GLoc*pTrue for a smooth nodal potential pTrue), built
+// algebraically so it is exact by construction with no interpolation error,
+// and chosen (sin(pi x)sin(pi y)sin(pi z)) so its tangential component
+// vanishes on all 6 cube faces -- consistent with the PEC on() constraint.
+// This is exactly the case plain Jacobi/algebraic smoothers are known to be
+// bad at (curl-curl sees zero signal from a pure gradient); HX's gradient-
+// correction term should converge on it much faster. If it doesn't, the
+// gradient-correction term isn't doing real work and something is wrong.
+//
+// Test B (generic sanity check): a Gaussian source RHS like the project's
+// actual srcProfile excitation (not a pure gradient), comparing the same
+// two preconditioners for a general correctness check.
+
+load "msh3"
+load "PETSc-complex"
+load "Element_Mixte3d"
+macro dimension()3// EOM
+include "macro_ddm.idp"
+
+mesh3 Th = cube(5, 5, 5);
+func Pk = Edge03d;
+fespace Eh(Th, Pk);
+
+macro dot3(a1,a2,a3,b1,b2,b3) ((a1)*(b1) + (a2)*(b2) + (a3)*(b3)) //
+macro ndot(u1,u2,u3) (N.x*(u1) + N.y*(u2) + N.z*(u3)) //
+macro tangDot(u1,u2,u3,v1,v2,v3) (
+  ((u1)-N.x*ndot(u1,u2,u3))*((v1)-N.x*ndot(v1,v2,v3))
++ ((u2)-N.y*ndot(u1,u2,u3))*((v2)-N.y*ndot(v1,v2,v3))
++ ((u3)-N.z*ndot(u1,u2,u3))*((v3)-N.z*ndot(v1,v2,v3))
+) //
+macro epsEff() (1.0) //   // toy test: constant eps=1, no loss/PML
+func real isSMLabel(int lb) { return 0; }
+int useSM = 0;
+
+real k0 = 2.0 * pi;
+
+Mat<complex> A;
+int[int] n2o;
+macro ThN2O()n2o// EOM
+DmeshCreate(Th);
+{
+  macro ThPkPart()Edge03ds0// EOM
+  MatCreate(Th, A, Pk);
+}
+
+varf aMaxwell([Ex, Ey, Ez], [Vx, Vy, Vz]) =
+    int3d(Th)(
+        dot3(
+            dy(Ez) - dz(Ey), dz(Ex) - dx(Ez), dx(Ey) - dy(Ex),
+            dy(Vz) - dz(Vy), dz(Vx) - dx(Vz), dx(Vy) - dy(Vx)
+        )
+      - (k0 * k0) * epsEff * dot3(Ex, Ey, Ez, Vx, Vy, Vz)
+    )
+  + on(1, 2, 3, 4, 5, 6, Ex = 0, Ey = 0, Ez = 0);
+
+matrix<complex> Aloc = aMaxwell(Eh, Eh);
+
+// Config globals hx_precon.idp expects.
+string petscOptions = "-ksp_type gmres -pc_type gamg -ksp_rtol 1e-2 -ksp_max_it 20";
+real hxSmootherOmega = 1.0;
+int pecLabel1 = 1, pecLabel2 = 2, pecLabel3 = 3, pecLabel4 = 4,
+    pecLabel5 = 5, pecLabel6 = 6, pecLabel7 = -1, pecLabel8 = -1;
+
+include "hx_precon.idp"
+
+func complex[int] matvec(complex[int] & v) {
+  complex[int] y = Aloc * v;
+  return y;
+}
+
+// ---- Test A: gradient-dominated manufactured solution ----
+fespace VhNode(Th, P1);
+VhNode pTrue = sin(pi*x) * sin(pi*y) * sin(pi*z);
+complex[int] pTrueC(VhNode.ndof);
+for (int i = 0; i < VhNode.ndof; i++) pTrueC[i] = pTrue[][i];
+complex[int] EtrueVec = hxGLoc * pTrueC;
+complex[int] bGrad = Aloc * EtrueVec;
+
+func real srcProfile(real xx, real yy, real zz) {
+  real rx = (xx - 0.5) / 0.15, ry = (yy - 0.5) / 0.15, rz = (zz - 0.5) / 0.15;
+  return exp(-(rx*rx + ry*ry + rz*rz));
+}
+varf vRhs([Ex,Ey,Ez],[Vx,Vy,Vz]) = int3d(Th)(srcProfile(x,y,z)*Vx) + on(1,2,3,4,5,6, Ex=0,Ey=0,Ez=0);
+complex[int] bGen(Eh.ndof);
+bGen = vRhs(0, Eh);
+
+int gmresN = Eh.ndof;
+real gmresRtol = 1e-8;
+int gmresMaxIt = 200;
+int gmresRestart = 30;
+
+cout << "=== Test A: gradient-dominated RHS, Jacobi ===" << endl;
+{
+  complex[int] gmresB(Eh.ndof);
+  gmresB = bGrad;
+  complex[int] gmresX(Eh.ndof);
+  gmresX = 0.0;
+  int gmresIterCount = 0;
+  real gmresRelRes = 1.0;
+  int gmresConverged = 0;
+  func complex[int] precon(complex[int] & v) {
+    complex[int] z(v.n);
+    for (int i = 0; i < v.n; i++) z[i] = v[i] / hxDiagA[i];
+    return z;
+  }
+  include "gmres_precon.idp"
+  cout << "Jacobi: iters=" << gmresIterCount << " relRes=" << gmresRelRes << " converged=" << gmresConverged << endl;
+}
+
+cout << "=== Test A: gradient-dominated RHS, HX ===" << endl;
+{
+  complex[int] gmresB(Eh.ndof);
+  gmresB = bGrad;
+  complex[int] gmresX(Eh.ndof);
+  gmresX = 0.0;
+  int gmresIterCount = 0;
+  real gmresRelRes = 1.0;
+  int gmresConverged = 0;
+  func complex[int] precon(complex[int] & v) { return hxPrecon(v); }
+  include "gmres_precon.idp"
+  cout << "HX: iters=" << gmresIterCount << " relRes=" << gmresRelRes << " converged=" << gmresConverged << endl;
+}
+
+cout << "=== Test B: generic Gaussian-source RHS, Jacobi ===" << endl;
+{
+  complex[int] gmresB(Eh.ndof);
+  gmresB = bGen;
+  complex[int] gmresX(Eh.ndof);
+  gmresX = 0.0;
+  int gmresIterCount = 0;
+  real gmresRelRes = 1.0;
+  int gmresConverged = 0;
+  func complex[int] precon(complex[int] & v) {
+    complex[int] z(v.n);
+    for (int i = 0; i < v.n; i++) z[i] = v[i] / hxDiagA[i];
+    return z;
+  }
+  include "gmres_precon.idp"
+  cout << "Jacobi: iters=" << gmresIterCount << " relRes=" << gmresRelRes << " converged=" << gmresConverged << endl;
+}
+
+cout << "=== Test B: generic Gaussian-source RHS, HX ===" << endl;
+{
+  complex[int] gmresB(Eh.ndof);
+  gmresB = bGen;
+  complex[int] gmresX(Eh.ndof);
+  gmresX = 0.0;
+  int gmresIterCount = 0;
+  real gmresRelRes = 1.0;
+  int gmresConverged = 0;
+  func complex[int] precon(complex[int] & v) { return hxPrecon(v); }
+  include "gmres_precon.idp"
+  cout << "HX: iters=" << gmresIterCount << " relRes=" << gmresRelRes << " converged=" << gmresConverged << endl;
+}

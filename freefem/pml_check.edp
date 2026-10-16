@@ -1,0 +1,57 @@
+// PML verification by DIRECT solve (UMFPACK), independent of any iterative method.
+// Reports, for the solution of the benchmark system A E = b:
+//   * RMS |E| in the core vs. in the outer half of the PML shell (decay),
+//   * |E|^2 integrated over a fixed inner box (compare across PML thicknesses:
+//     a reflection-free PML gives the same value),
+//   * the relative residual of the direct solve.
+// pmlVariant (config or -pmlVariant arg): "upml" (current solver formulation) or
+// "old" (the pre-2026-09-28 isotropic layer eps + i*sigma0/k0, sigma0 = k0*t).
+load "msh3"
+load "gmsh"
+load "MUMPS_seq"   // sparsesolver -> MUMPS (UMFPACK runs out of workspace above ~0.1M DOF)
+include "getARGV.idp"
+include "runtime_case_config.idp"
+string pmlVariant = getARGV("-pmlVariant", "upml");
+
+mesh3 Th = gmshload3(meshFile);
+fespace Eh(Th, Edge03d);
+cout << "NDOF = " << Eh.ndof << endl;
+include "maxwell_common.idp"
+
+if (pmlVariant == "old") {
+  // old formulation: isotropic, mass term only, eps += i*sigma0/k0 in the PML
+  real sig0 = (2.0 * pi / lambda0) * pmlThick;
+  Ph0 inPml = (max(max(max(x - pmlXmax, pmlXmin - x), max(y - pmlYmax, pmlYmin - y)),
+                   max(z - pmlZmax, pmlZmin - z)) > 0);
+  epsC = epsC + 1i * sig0 / k0 * inPml;
+  lamX = 1.0; lamY = 1.0; lamZ = 1.0; ilamX = 1.0; ilamY = 1.0; ilamZ = 1.0;
+}
+
+real srcWidthInv = 1.0 / max(srcWidth, 1.0e-8);
+varf lRhs([Ex, Ey, Ez], [Vx, Vy, Vz]) =
+    int3d(Th)( srcAmp * exp(-(square((x - srcX0) * srcWidthInv) + square((y - srcY0) * srcWidthInv)
+                              + square((z - srcZ0) * srcWidthInv))) * Vx )
+  + on(pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+       pecLabel5, pecLabel6, pecLabel7, pecLabel8, Ex = 0, Ey = 0, Ez = 0);
+
+matrix<complex> A = aMaxwell(Eh, Eh, solver = sparsesolver);
+complex[int] b = lRhs(0, Eh);
+Eh<complex> [Ex, Ey, Ez];
+Ex[] = A^-1 * b;
+complex[int] r = A * Ex[];
+r -= b;
+cout << "DIRECT relres " << r.l2 / b.l2 << endl;
+
+Ph0 dPen = max(max(max(x - pmlXmax, pmlXmin - x), max(y - pmlYmax, pmlYmin - y)), max(z - pmlZmax, pmlZmin - z));
+Ph0 inCore = (dPen <= 0);
+Ph0 inOuter = (dPen > 0.5 * pmlThick);
+real vCore = int3d(Th)(inCore), vOuter = int3d(Th)(inOuter);
+real eCore = int3d(Th)(inCore * (square(abs(Ex)) + square(abs(Ey)) + square(abs(Ez))));
+real eOuter = int3d(Th)(inOuter * (square(abs(Ex)) + square(abs(Ey)) + square(abs(Ez))));
+real hb = 0.45 * min(pmlXmax - pmlXmin, min(pmlYmax - pmlYmin, pmlZmax - pmlZmin));
+real eInner = int3d(Th)((abs(x) < hb) * (abs(y) < hb) * (abs(z) < hb)
+                        * (square(abs(Ex)) + square(abs(Ey)) + square(abs(Ez))));
+cout << "PML_DIAG variant " << pmlVariant << " rmsCore " << sqrt(eCore / vCore)
+     << " rmsPmlOuter " << sqrt(eOuter / max(vOuter, 1e-30))
+     << " ratio " << sqrt(eOuter / max(vOuter, 1e-30)) / sqrt(eCore / vCore)
+     << " energyInnerBox " << eInner << " halfWidth " << hb << endl;

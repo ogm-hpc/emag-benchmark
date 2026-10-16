@@ -1,0 +1,95 @@
+// Matrix export for the matrix-feature analysis (freefem/pcb/matrix_features.py).
+// Assembles the system matrix A exactly as maxwell_pcb_solver.edp (aMaxwell of
+// pcb_common.idp: material, UPML, Silver-Mueller, lumped-port and SIBC terms,
+// PEC by on() penalty), and, for the curl kernel (topology), the plain
+// curl-curl K0 and mass M0 (eps = 1, no PML), the discrete gradient G
+// (edges x P1 nodes, MatrixEdgeP1, the same numbering as A) and the P1 nodes
+// on PEC, and the material mass Meps of A. No solve. Writes each matrix as one
+// float64 vector [n, m, nnz, I (0-based), J, Re, Im] (BinaryIO SaveVec: int64
+// length, then the values) to the job directory: A.bin, Meps.bin, K0.bin,
+// M0.bin, G.bin, and pecnode.txt, surfnode.txt.
+//
+// Expects runtime_case_config.idp and pcb_case_config.idp (run_pcb_benchmark.py).
+
+load "msh3"
+load "gmsh"
+load "Element_Mixte3d"
+load "mat_edgeP1"
+load "BinaryIO"
+
+include "runtime_case_config.idp"
+include "pcb_case_config.idp"
+
+mesh3 Th = gmshload3(meshFile);
+fespace Eh(Th, Edge03d);
+cout << "NDOF = " << Eh.ndof << endl;
+include "pcb_common.idp"
+
+macro writeCoo(file, Mat, T)
+{
+  int[int] cooI(1), cooJ(1);
+  T[int] cooC(1);
+  [cooI, cooJ, cooC] = Mat;
+  int nz = cooI.n;
+  real[int] buf(3 + 4 * nz);
+  buf[0] = Mat.n; buf[1] = Mat.m; buf[2] = nz;
+  for (int k = 0; k < nz; k++) {
+    buf[3 + k] = cooI[k]; buf[3 + nz + k] = cooJ[k];
+    buf[3 + 2 * nz + k] = real(cooC[k]); buf[3 + 3 * nz + k] = imag(cooC[k]);
+  }
+  SaveVec(buf, file);
+  cout << "WROTE " << file << " " << Mat.n << " x " << Mat.m << " nnz " << nz << endl;
+}
+// EOM
+
+matrix<complex> A = aMaxwell(Eh, Eh);
+writeCoo("A.bin", A, complex)
+// material mass (eps~ = eps*Lambda) of A: A = Kc - k0^2 Meps, Kc = curl + surface terms
+varf vMeps([Ex, Ey, Ez], [Vx, Vy, Vz]) = int3d(Th)( massTerm(Ex, Ey, Ez, Vx, Vy, Vz) );
+matrix<complex> Meps = vMeps(Eh, Eh);
+writeCoo("Meps.bin", Meps, complex)
+
+varf vK0([Ex, Ey, Ez], [Vx, Vy, Vz]) =
+    int3d(Th)( (dy(Ez) - dz(Ey)) * (dy(Vz) - dz(Vy)) + (dz(Ex) - dx(Ez)) * (dz(Vx) - dx(Vz))
+             + (dx(Ey) - dy(Ex)) * (dx(Vy) - dy(Vx)) )
+  + on(pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+       pecLabel5, pecLabel6, pecLabel7, pecLabel8, Ex = 0, Ey = 0, Ez = 0);
+varf vM0([Ex, Ey, Ez], [Vx, Vy, Vz]) = int3d(Th)( Ex * Vx + Ey * Vy + Ez * Vz );
+matrix<complex> K0 = vK0(Eh, Eh);
+writeCoo("K0.bin", K0, complex)
+matrix<complex> M0 = vM0(Eh, Eh);
+writeCoo("M0.bin", M0, complex)
+
+matrix Gr;
+MatrixEdgeP1(Gr, Th);
+matrix<complex> G = Gr;
+writeCoo("G.bin", G, complex)
+
+fespace Vh1(Th, P1);
+varf vPecNode(p, q) = on(pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+                         pecLabel5, pecLabel6, pecLabel7, pecLabel8, p = 1);
+real[int] pecNode = vPecNode(0, Vh1, tgv = 1);
+{
+  ofstream f("pecnode.txt");
+  f << pecNode.n << endl;
+  for (int i = 0; i < pecNode.n; i++) f << (pecNode[i] != 0 ? 1 : 0) << endl;
+}
+// P1 nodes on faces carrying a tangential surface term (Silver-Mueller when
+// active, lumped ports, SIBC): their gradients are not in the kernel of the
+// curl + surface part of A, so the resonance search deflates only the others.
+int smL1 = -1, smL2 = -1, smL3 = -1, smL4 = -1;
+if (useSM) { smL1 = smLabel1; smL2 = smLabel2; smL3 = smLabel3; smL4 = smLabel4; }
+varf vSurfNode(p, q) = on(smL1, smL2, smL3, smL4,
+                          portLabel1, portLabel2, portLabel3, portLabel4,
+                          portLabel5, portLabel6, portLabel7, portLabel8,
+                          portLabel9, portLabel10, portLabel11, portLabel12,
+                          portLabel13, portLabel14, portLabel15, portLabel16,
+                          sibcLabel1, sibcLabel2, sibcLabel3, sibcLabel4, p = 1);
+real[int] surfNode = vSurfNode(0, Vh1, tgv = 1);
+{
+  ofstream f("surfnode.txt");
+  f << surfNode.n << endl;
+  for (int i = 0; i < surfNode.n; i++) f << (surfNode[i] != 0 ? 1 : 0) << endl;
+}
+cout << "K0_SQ " << k0 * k0 << endl;
+cout << "EXPORT_DONE" << endl;

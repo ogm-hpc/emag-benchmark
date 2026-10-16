@@ -1,0 +1,86 @@
+// Preconditioned COCG (Conjugate Orthogonal CG, van der Vorst & Melissen
+// 1990) for complex-SYMMETRIC (non-Hermitian) systems: all inner products
+// below are the UNCONJUGATED bilinear form u^T v = sum(u_i*v_i), matching
+// the complex-symmetric structure of A (curl-curl - k^2*eps, never
+// conjugated) -- this is what distinguishes COCG from ordinary complex CG
+// (which would use the Hermitian inner product and require A=A^H).
+//
+// Include-style code block (see gmres_precon.idp for why), operating on
+// caller-defined globals:
+//   func complex[int] matvec(complex[int] & v)   -- returns A*v
+//   func complex[int] precon(complex[int] & v)   -- returns (approx) M^-1*v
+//   int cocgN, complex[int] cocgB(cocgN), complex[int] cocgX(cocgN) (in/out)
+//   real cocgRtol, int cocgMaxIt
+// On return: cocgX holds the solution, cocgIterCount/cocgRelRes/cocgConverged
+// are set. Known breakdown mode (same as PETSc's COCG): DIVERGED_INDEFINITE_MAT-
+// style stagnation/division-by-~0 is possible on this indefinite system --
+// detected here via a pivotFloor guard on rho/pAp, reported as non-converged
+// rather than crashing.
+
+//
+// Efficiency (2026-09-28): the unconjugated products u^T v are computed as
+// (u .* v).sum (built-in, verified identical to the former script loop).
+
+{
+  complex[int] cocgTmp(cocgN);
+  complex[int] r(cocgN);
+  r = matvec(cocgX);
+  r = cocgB - r;
+  real beta0 = r.l2;
+  if (beta0 <= 0.0) beta0 = 1.0;
+
+  cocgIterCount = 0;
+  cocgRelRes = r.l2 / beta0;
+  cocgConverged = 0;
+  cout << cocgIterCount << " KSP Residual norm " << r.l2 << endl;
+
+  complex[int] z = precon(r);
+  complex[int] p(cocgN);
+  p = z;
+  cocgTmp = r .* z;
+  complex rho = cocgTmp.sum;
+
+  // Breakdown test (2026-09-28): the two divisors of the recurrence, p^T A p
+  // and rho = r^T z, are tested RELATIVE to the norms of their factors
+  // (|p^T q| < eps*|p||q|, |r^T z| < eps*|r||z|): the unconjugated bilinear
+  // form of a nonzero complex vector can vanish (true Lanczos-type breakdown),
+  // but a small absolute value is not one. The former absolute floor (1e-13)
+  // fired on healthy iterations once ||b|| and the residual were small (e.g.
+  // case2E: |p^T A p| = 3.5e-14 with |p^T A p|/(|p||Ap|) = 2e-3), stopping 41
+  // of 46 accel_ic/COCG runs at relative residuals of 1e-2..1e-4.
+  real breakdownEps = 1.0e-14;
+  bool broke = false;
+  if (abs(rho) < breakdownEps * r.l2 * z.l2) broke = true;
+
+  while (cocgIterCount < cocgMaxIt && !cocgConverged && !broke) {
+    complex[int] q = matvec(p);
+    cocgTmp = p .* q;
+    complex pAp = cocgTmp.sum;
+    if (abs(pAp) < breakdownEps * p.l2 * q.l2) { broke = true; break; }
+
+    complex alpha = rho / pAp;
+    cocgX += alpha * p;
+    r -= alpha * q;
+
+    cocgIterCount += 1;
+    cocgRelRes = r.l2 / beta0;
+    cout << cocgIterCount << " KSP Residual norm " << r.l2 << endl;
+    if (cocgRelRes <= cocgRtol) { cocgConverged = 1; break; }
+
+    z = precon(r);
+    cocgTmp = r .* z;
+    complex rhoNew = cocgTmp.sum;
+    // rhoNew is the next divisor (next beta and alpha)
+    if (abs(rhoNew) < breakdownEps * r.l2 * z.l2) { broke = true; break; }
+    complex bbeta = rhoNew / rho;
+    p = z + bbeta * p;
+    rho = rhoNew;
+  }
+  if (broke && !cocgConverged) {
+    cout << "COCG breakdown detected (|p^T A p| or |r^T z| < 1e-14 x norms) at iteration " << cocgIterCount << endl;
+  }
+  // the recurrence residual can drift from the true one in finite precision
+  complex[int] rTrue = matvec(cocgX);
+  rTrue = cocgB - rTrue;
+  cout << "COCG true relative residual " << rTrue.l2 / beta0 << " (recurrence " << cocgRelRes << ")" << endl;
+}

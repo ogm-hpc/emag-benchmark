@@ -1,0 +1,285 @@
+// HX auxiliary-space preconditioner. Full Hiptmair-Xu form is 3 additive
+// terms:
+//   hxPrecon(r) = omega*D_A^-1*r + G*(Mgrad^-1*(G^T*r)) + Pi*(Mvec^-1*(Pi^T*r))
+// but hxPrecon ACTUALLY RETURNS ONLY THE FIRST TWO TERMS by default (see
+// hxEnableVecTerm below) -- D_A is A's own diagonal (a plain Jacobi
+// smoother) and the second term is the gradient/near-null-space correction
+// (every gradient field satisfies curl(grad phi)=0, so A's curl-curl term
+// vanishes exactly on gradients, leaving only the mass term -- Mgrad, a
+// plain scalar P1 problem, not sign-indefinite so no shift needed). This
+// 2-term form is verified working (test_hx_toy.edp: Test A converges in 23
+// iters, Test B reaches relRes 2.7e-3 in 200 iters, both beating plain
+// Jacobi).
+//
+// The third term (vector-Laplacian correction via Pi, a P1^3 -> Edge03d
+// tangential nodal interpolation, and Mvec) IS IMPLEMENTED BELOW but IS
+// DISABLED BY DEFAULT (hxEnableVecTerm=0) -- 2026-07-29 toy testing found
+// that even after (a) correcting Mvec to the theoretically-prescribed
+// Galerkin projection M_vec = Pi^T*A*Pi (matching Hiptmair-Xu/HYPRE AMS
+// theory -- an earlier version independently re-discretized the curl-curl-
+// k^2*eps bilinear form directly on the P1^3 space instead, which is a
+// genuinely DIFFERENT, theory-incorrect operator since Pi, unlike G, is only
+// an approximate representation of a general P1^3 field as a Nedelec field)
+// and (b) fixing a missing Dirichlet RHS-zeroing bug (Mvec's boundary-node
+// rows/cols are an identity block, but the RHS entering that solve was never
+// zeroed at the same DOFs, so u_bnd = 1^-1*rVec_bnd passed an arbitrary
+// nonzero value straight through instead of enforcing u_bnd=0) --
+// enabling this term STILL causes complete GMRES stagnation (test_hx_toy.edp
+// Test B: relRes frozen bit-for-bit at 1.0 for all 200 iterations, confirmed
+// by tracing the raw per-iteration KSP residual; root cause traced to
+// matvec(hxPrecon(v)) ending up numerically orthogonal to v at every Arnoldi
+// step once vecCorrection is included, i.e. H(j,j)~0 persistently -- a
+// distinct, deeper defect from the theoretical-fidelity gap, still
+// unresolved). Toggling hxEnableVecTerm to 0 was confirmed to immediately
+// restore healthy convergence in both toy tests, isolating the bug to this
+// term specifically (not the smoother or gradient-correction terms, and not
+// the GMRES driver). The construction code is left in place, unused by
+// default, for a future investigation -- see problem_settings.md's HX
+// section for the full writeup. Like A, M_vec inherits A's full
+// sign-indefiniteness and is left unshifted here deliberately (a CSLP-
+// shifted version is cslp_hx_precon.idp, which has the SAME defect since it
+// shares this same construction pattern).
+//
+// Pi is built directly from mat_edgeP1's MatrixEdgeP1 output (GLoc): each
+// edge row has exactly 2 nonzero entries (tail, negative; head, positive),
+// so its topology already tells us which two nodes bound each edge and
+// their orientation -- combined with nodal coordinates, the lowest-order
+// Whitney edge DOF (tangential circulation over a straight edge, P1 field)
+// is exact via the trapezoid rule: Pi(u)_e = (x_head-x_tail).(u(tail)+u(head))/2.
+// Verified empirically (test_vector_fespace_order.edp) that FreeFEM's
+// bundled fespace(Th,[P1,P1,P1]) stores DOFs INTERLEAVED BY NODE (node i's
+// x,y,z components at indices 3i,3i+1,3i+2), not blocked -- Pi/Mvec's
+// column indexing below relies on this.
+//
+// Include-style code block, operating on caller-defined globals already
+// present in maxwell_edge03d_solver.edp's scope:
+//   mesh3 Th, matrix<complex> Aloc, real k0, string petscOptions,
+//   real hxSmootherOmega, pecLabel1..pecLabel8, useSM, and the gradTerm /
+//   massTerm / curlTerm / tangDot / isSMLabel macros (material + UPML tensors).
+// On return: a ready-to-use func complex[int] hxPrecon(complex[int] & r).
+//
+// 2026-09-28: the Pi/Mvec (3rd-term) construction below is compiled only when
+// the macro HXVECTERM is defined (it is not, by default): previously it was
+// always BUILT (Pi, Pi^T*A*Pi Galerkin product, a 3x-size PETSc Mat + GAMG
+// setup) and then never used. The smoother is now a vectorized diagonal scale.
+
+load "mat_edgeP1"
+
+// omega * D_A^-1 as a vector (Aloc.diag; zero pivots floored).
+complex[int] hxSmoothInv = Aloc.diag;
+{
+  real hxPivotFloor = 1.0e-12;
+  for (int i = 0; i < hxSmoothInv.n; i++)
+    if (abs(hxSmoothInv[i]) < hxPivotFloor) hxSmoothInv[i] = hxPivotFloor;
+  complex[int] hxOne(hxSmoothInv.n);
+  hxOne = hxSmootherOmega;
+  hxOne ./= hxSmoothInv;
+  hxSmoothInv = hxOne;
+}
+
+matrix hxGLoc;
+MatrixEdgeP1(hxGLoc, Th);
+
+func PkHxNode = P1;
+fespace HxPh(Th, PkHxNode);
+
+// M_grad = A restricted to gradients, A(grad p, grad q): curl(grad p)=0 kills
+// the curl-curl part, leaving -k0^2 (eps~ grad p).grad q (a stiffness-type
+// form, NOT a p*q mass form) plus the Silver-Mueller boundary term on the
+// tangential gradient, so that M_grad matches G^T*A*G (Nedelec elements
+// represent grad(P1) exactly).
+varf hxVMgrad(p, q) =
+    int3d(Th)( -(k0 * k0) * gradTerm(p, q) )
+  + int2d(Th)( useSM * isSMLabel(label) * 1i * k0 * tangDot(dx(p), dy(p), dz(p), dx(q), dy(q), dz(q)) )
+  + on(pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+       pecLabel5, pecLabel6, pecLabel7, pecLabel8, p = 0);
+
+Mat<complex> hxMgrad;
+MatCreate(Th, hxMgrad, PkHxNode);
+hxMgrad = hxVMgrad(HxPh, HxPh);
+set(hxMgrad, sparams = petscOptions);
+
+IFMACRO(HXVECTERM)
+
+// --- Pi: P1^3 (nodal, interleaved-by-node) -> Edge03d tangential
+// interpolation, built directly from GLoc's own topology (each edge row
+// has exactly 2 nonzero entries: negative = tail, positive = head). For a
+// straight edge and a P1 (linear) vector field, the Whitney edge DOF
+// (tangential circulation) is exact via the trapezoid rule:
+//   Pi(u)_e = (x_head - x_tail) . (u(tail) + u(head)) / 2
+int hxNEdge = hxGLoc.n;
+int hxNNode = hxGLoc.m;
+int[int] hxEdgeTail(hxNEdge), hxEdgeHead(hxNEdge);
+{
+  int[int] hxGI, hxGJ;
+  real[int] hxGC;
+  [hxGI, hxGJ, hxGC] = hxGLoc;
+  // The COO extraction of a MatrixEdgeP1-built matrix carries exactly one
+  // extra (row=hxNEdge, col=hxNNode) sentinel/padding entry beyond the
+  // genuine 2-per-edge structure (confirmed empirically: nnz ==
+  // 2*hxNEdge+1, with the extra entry's row/col one past the valid range)
+  // -- skip any out-of-range entry rather than indexing with it.
+  for (int t = 0; t < hxGI.n; t++) {
+    if (hxGI[t] >= hxNEdge || hxGJ[t] >= hxNNode) continue;
+    if (hxGC[t] < 0) hxEdgeTail[hxGI[t]] = hxGJ[t];
+    else hxEdgeHead[hxGI[t]] = hxGJ[t];
+  }
+}
+
+HxPh hxX = x, hxY = y, hxZ = z;
+
+int[int] hxPiRows(6 * hxNEdge + 1), hxPiCols(6 * hxNEdge + 1);
+real[int] hxPiVals(6 * hxNEdge + 1);
+{
+  int t = 0;
+  for (int e = 0; e < hxNEdge; e++) {
+    int n1 = hxEdgeTail[e], n2 = hxEdgeHead[e];
+    real ddx = hxX[][n2] - hxX[][n1];
+    real ddy = hxY[][n2] - hxY[][n1];
+    real ddz = hxZ[][n2] - hxZ[][n1];
+    hxPiRows[t] = e; hxPiCols[t] = 3*n1 + 0; hxPiVals[t] = ddx / 2.0; t += 1;
+    hxPiRows[t] = e; hxPiCols[t] = 3*n1 + 1; hxPiVals[t] = ddy / 2.0; t += 1;
+    hxPiRows[t] = e; hxPiCols[t] = 3*n1 + 2; hxPiVals[t] = ddz / 2.0; t += 1;
+    hxPiRows[t] = e; hxPiCols[t] = 3*n2 + 0; hxPiVals[t] = ddx / 2.0; t += 1;
+    hxPiRows[t] = e; hxPiCols[t] = 3*n2 + 1; hxPiVals[t] = ddy / 2.0; t += 1;
+    hxPiRows[t] = e; hxPiCols[t] = 3*n2 + 2; hxPiVals[t] = ddz / 2.0; t += 1;
+  }
+  // Guarantee the matrix's column count reaches 3*hxNNode even if the last
+  // node's z-component never happened to be the max column touched above
+  // (harmless duplicate/zero entry if it already was).
+  hxPiRows[t] = 0; hxPiCols[t] = 3 * hxNNode - 1; hxPiVals[t] = 0.0;
+}
+matrix hxPi = [hxPiRows, hxPiCols, hxPiVals];
+
+// --- Mvec: per Hiptmair-Xu / HYPRE AMS theory, the auxiliary vector-space
+// operator is the GALERKIN PROJECTION of the ORIGINAL edge-space operator
+// through Pi: M_vec = Pi^T * A * Pi -- NOT an independently re-discretized
+// curl-curl-k^2*eps bilinear form on the P1^3 space (an earlier version of
+// this file did the latter; that is a DIFFERENT operator from what the
+// theory prescribes, since Pi is only an approximate representation of a
+// general P1^3 field as a Nedelec field -- unlike Mgrad, where grad(P1) is
+// represented EXACTLY by Nedelec elements, so direct re-discretization and
+// G^T*A*G coincide there. See problem_settings.md's "HXの理論的忠実性" note.
+//
+// Aloc already carries A's on()-based PEC elimination on the EDGE space, but
+// projecting that through Pi does not automatically yield a clean Dirichlet
+// elimination for the P1^3 nodal DOFs on the PEC boundary (Pi maps a
+// boundary node's 3 nodal DOFs onto a mix of boundary AND interior edges) --
+// so boundary nodal DOFs are explicitly zeroed/re-diagonalized below,
+// identified directly from the PEC-tagged boundary triangles (Th.be),
+// independent of Pi's own structure.
+complex[int] hxPiValsC(hxPiVals.n);
+for (int t = 0; t < hxPiVals.n; t++) hxPiValsC[t] = hxPiVals[t];
+matrix<complex> hxPiC = [hxPiRows, hxPiCols, hxPiValsC];
+
+matrix<complex> hxAPi = Aloc * hxPiC;
+matrix<complex> hxMvecGalerkin = hxPiC' * hxAPi;
+
+int[int] hxBndNode(hxNNode);
+hxBndNode = 0;
+for (int k = 0; k < Th.nbe; k++) {
+  int lab = Th.be(k).label;
+  bool isPec = (lab == pecLabel1) || (lab == pecLabel2) || (lab == pecLabel3) || (lab == pecLabel4)
+             || (lab == pecLabel5) || (lab == pecLabel6) || (lab == pecLabel7) || (lab == pecLabel8);
+  if (isPec) {
+    for (int v = 0; v < 3; v++) hxBndNode[Th.be(k)[v]] = 1;
+  }
+}
+int hxNBndNode = 0;
+for (int n = 0; n < hxNNode; n++) if (hxBndNode[n] == 1) hxNBndNode += 1;
+
+matrix<complex> hxMvecRaw;
+{
+  int[int] hxMI, hxMJ;
+  complex[int] hxMC;
+  [hxMI, hxMJ, hxMC] = hxMvecGalerkin;
+  int nnz = hxMI.n;
+  int[int] hxMI2(nnz + 3 * hxNBndNode);
+  int[int] hxMJ2(nnz + 3 * hxNBndNode);
+  complex[int] hxMC2(nnz + 3 * hxNBndNode);
+  for (int t = 0; t < nnz; t++) {
+    int ni = hxMI[t] / 3;
+    int nj = hxMJ[t] / 3;
+    hxMI2[t] = hxMI[t];
+    hxMJ2[t] = hxMJ[t];
+    hxMC2[t] = (hxBndNode[ni] == 1 || hxBndNode[nj] == 1) ? 0.0 : hxMC[t];
+  }
+  int t = nnz;
+  for (int n = 0; n < hxNNode; n++) {
+    if (hxBndNode[n] == 1) {
+      for (int c = 0; c < 3; c++) {
+        hxMI2[t] = 3 * n + c; hxMJ2[t] = 3 * n + c; hxMC2[t] = 1.0; t += 1;
+      }
+    }
+  }
+  hxMvecRaw = [hxMI2, hxMJ2, hxMC2];
+}
+
+// MatCreate on a genuine vector (non-mixed) Lagrange space needs
+// macro_ddm.idp's def()/init() convention (component name + B/C suffixes)
+// and an explicit block size -- confirmed via
+// examples/hpddm/elasticity-3d-PETSc.edp, the only real precedent found for
+// MatCreate on a [P1,P1,P1]-style space; the naive inline [ux,uy,uz] naming
+// used at first failed to compile ("Invalid array size for vectorial
+// fespace function") because that internal machinery expects exactly this
+// naming pattern.
+// IMPORTANT: `def`/`init` must be defined HERE, immediately before this
+// point, and NOT any earlier -- macro_ddm.idp's MatCreate dispatch checks
+// whether `def` exists AT ALL at each MatCreate call site (macros are not
+// block-scoped; once defined they stay defined for the rest of the script),
+// so defining it any earlier would wrongly vector-dispatch the scalar
+// hxMgrad MatCreate above (confirmed empirically: "the array size must be 1
+// not 3" on hxMgrad's MatCreate when def/init were hoisted before it). For
+// the same reason, a script that needs a scalar MatCreate call AFTER this
+// point (e.g. combining hx_precon.idp with cslp_hx_precon.idp, which also
+// needs a scalar Mgrad/P MatCreate of its own) cannot simply re-include this
+// file's def/init a second time -- see
+// freefem/maxwell_edge03d_multi_solve.edp, which instead reuses hxGLoc/
+// hxMgrad/hxPi directly instead of rebuilding them for cslp_hx.
+macro def(i)[i, i#B, i#C]// EOM
+macro init(i)[i, i, i]// EOM
+func PkHxVec = [P1, P1, P1];
+fespace HxVh(Th, PkHxVec);
+
+Mat<complex> hxMvec;
+MatCreate(Th, hxMvec, PkHxVec);
+hxMvec = hxMvecRaw;
+set(hxMvec, sparams = petscOptions, bs = 3);
+
+ENDIFMACRO
+
+// Disabled by default -- see the file header's 2026-07-29 note: enabling
+// this reproduces a confirmed GMRES-stagnation bug in the vecCorrection
+// term. To debug it, define the macro HXVECTERM before including this file.
+func complex[int] hxPrecon(complex[int] & r) {
+  complex[int] smoothed(r.n);
+  smoothed = hxSmoothInv .* r;
+
+  complex[int] rNode = hxGLoc' * r;
+  complex[int] pNode = hxMgrad^-1 * rNode;
+  complex[int] gradCorrection = hxGLoc * pNode;
+
+  // hxMvec's boundary-node rows/cols are an identity (Dirichlet) block (see
+  // the Mvec construction above), so the RHS must ALSO be zeroed at those
+  // same DOFs before the solve -- otherwise u_bnd = 1^-1 * rVec_bnd passes
+  // rVec's (generally nonzero) boundary component straight through instead
+  // of enforcing the intended u_bnd=0, corrupting vecCorrection with a
+  // spurious boundary contribution (found via test_hx_toy.edp: rVec_bnd was
+  // O(1e-1) while rVec_int was ~1e-14 numerical noise, and without this fix
+  // uVec_bnd == rVec_bnd exactly, confirming the missing RHS elimination).
+  complex[int] z(r.n);
+  z = smoothed;
+  z += gradCorrection;
+
+  // Compiled only with HXVECTERM (disabled by default -- see file header).
+  IFMACRO(HXVECTERM)
+    complex[int] rVec = hxPi' * r;
+    for (int n = 0; n < hxNNode; n++)
+      if (hxBndNode[n] == 1)
+        for (int c = 0; c < 3; c++) rVec[3*n + c] = 0.0;
+    complex[int] uVec = hxMvec^-1 * rVec;
+    complex[int] vecCorrection = hxPi * uVec;
+    z += vecCorrection;
+  ENDIFMACRO
+  return z;
+}

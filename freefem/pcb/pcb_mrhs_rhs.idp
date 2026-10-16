@@ -1,0 +1,20 @@
+// Multiple right-hand sides (pcb_mrhs.idp): one lumped-port right-hand side
+// per port (lPort of pcb_port.idp with the port's values), zero initial guesses.
+{
+  mrhsNrhs = nPorts;
+  mrhsX.resize(mrhsNrhs);
+  mrhsB.resize(mrhsNrhs);
+  mrhsBnorm.resize(mrhsNrhs);
+  for (int q = 0; q < mrhsNrhs; q++) {
+    excLabel = portLabels[q]; excW = portWs[q]; excR = portRs[q];
+    excEx = portExs[q]; excEy = portEys[q]; excEz = portEzs[q];
+    mrhsB[q].resize(Eh.ndof);
+    mrhsB[q] = lPort(0, Eh);
+    mrhsX[q].resize(Eh.ndof);
+    mrhsX[q] = 0.0;
+    mrhsBnorm[q] = mrhsB[q].l2;
+    if (mrhsBnorm[q] <= 0.0) mrhsBnorm[q] = 1.0;
+  }
+  cout << "MRHS method " << mrhsMethod << " nrhs " << mrhsNrhs << " restart " << gmresRestartCfg
+       << " recycle " << mrhsRecycle << " recycleMax " << mrhsRecycleMax << endl;
+}

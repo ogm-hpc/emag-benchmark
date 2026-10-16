@@ -1,0 +1,527 @@
+// DEPRECATED (2026-09-28): superseded by maxwell_edge03d_solver.edp +
+// run_benchmark.py. This file does NOT contain the 2026-09-28 fixes (anisotropic
+// UPML instead of the gain-signed isotropic layer, LossyMaterial permittivity,
+// P0/P1 coefficient pre-evaluation, vectorized drivers); kept only to reproduce
+// pre-2026-09-28 results.
+//
+// Multi-combo Edge03d Maxwell solver: assembles the mesh/matrix/RHS EXACTLY
+// ONCE, then runs every (preconditioner, Krylov method) combination in this
+// project's performance-evaluation scope against that single assembly,
+// instead of paying mesh-load + matrix-assembly again per combo (as the
+// one-preset-per-process maxwell_edge03d_solver.edp does). Motivated by the
+// dry-run-all sweep (results/dry_run_all/): for large meshes (case1B,
+// case1A's larger sets, case2B/2D, case3A_high_contrast), mesh load +
+// assembly alone was consuming most/all of a 300s budget even for the
+// CHEAPEST preconditioners (GS/SSOR), independent of preconditioner cost --
+// so repeating it 11x per case (7 presets x applicable krylov choices) was
+// the dominant waste, not the solves themselves.
+//
+// Scope (problem_settings.md, 2026-07-27): GS, SSOR, AMG(GAMG), accel_ic x
+// {gmres, cocg}; CSLP, HX, CSLP_HX x {gmres only, --krylov ignored}.
+//
+// IMPORTANT ORDERING CONSTRAINT (see hx_precon.idp's header note): FreeFEM's
+// macro_ddm.idp MatCreate dispatch checks whether the `def`/`init` macros
+// exist AT ALL at each MatCreate call site -- macros are not block-scoped,
+// so once defined they corrupt every LATER scalar MatCreate call in the same
+// script (confirmed empirically: hoisting def/init before a scalar MatCreate
+// broke it with "array size must be 1 not 3"). Consequently every combo that
+// needs a SCALAR MatCreate (native GS/SSOR/AMG's shared `A`, CSLP's `P`, HX's
+// `hxMgrad`) must run BEFORE `def`/`init` are defined; `def`/`init` are
+// defined exactly once, immediately before the FIRST vector ([P1,P1,P1])
+// MatCreate (HX's `hxMvec`), and CSLP_HX's own Mgrad/G/Pi are NOT rebuilt --
+// it reuses HX's already-built hxGLoc/hxMgrad/hxPi directly (they are
+// identical constructions, unshifted) and only builds its OWN new piece
+// (the CSLP-shifted vector Laplacian), which is a second vector MatCreate
+// happening safely AFTER def/init already exist. CSLP_HX's `P` half is
+// likewise reused directly from the CSLP combo's own `P`, instead of
+// rebuilding a second identical shifted matrix.
+//
+// Runtime config (runtime_case_config.idp) provides everything
+// maxwell_edge03d_solver.edp does, PLUS:
+//   string nativeOptsGsGmres, nativeOptsGsCocg, nativeOptsSsorGmres,
+//          nativeOptsSsorCocg, nativeOptsAmgGmres, nativeOptsAmgCocg;
+//     -- fully-formed PETSc option strings (ksp_type + pc_type + ksp_max_it
+//        + ksp_rtol + ksp_monitor + ksp_converged_reason), one per native
+//        combo, each with its OWN calibrated -ksp_max_it.
+//   int accelIcMaxItGmres, accelIcMaxItCocg, cslpMaxIt, hxMaxIt, cslpHxMaxIt;
+//     -- per-preset calibrated iteration caps for the hand-rolled drivers.
+//
+// Output format: each combo's block is bracketed by
+//   COMBO_START preset=<name> krylov=<gmres|cocg>
+//   ... (same KSP Residual norm / Linear solve .../ SOLVE_TIME lines as the
+//        single-preset script, so existing log parsers work unchanged) ...
+//   COMBO_END
+// so a driver script can split the log into per-combo sections before
+// applying the same regexes generate_convergence_report.py/dry_run_all.py
+// already use.
+
+load "msh3"
+load "gmsh"
+load "PETSc-complex"
+load "Element_Mixte3d"
+load "mat_edgeP1"
+load "iovtk"
+macro dimension()3// EOM
+include "macro_ddm.idp"
+
+include "runtime_case_config.idp"
+
+cout << "==========================================" << endl;
+cout << "Edge03d Maxwell MULTI-COMBO solve" << endl;
+cout << "case = " << caseName << ", param = " << paramSetName << endl;
+cout << "mesh = " << meshFile << endl;
+cout << "==========================================" << endl;
+
+real tMesh0 = clock();
+mesh3 Th = gmshload3(meshFile);
+
+func Pk = Edge03d;
+fespace Eh(Th, Pk);
+
+Mat<complex> A;
+int[int] n2o;
+macro ThN2O()n2o// EOM
+DmeshCreate(Th);
+{
+  macro ThPkPart()Edge03ds0// EOM
+  MatCreate(Th, A, Pk);
+}
+
+macro dot3(a1,a2,a3,b1,b2,b3) ((a1)*(b1) + (a2)*(b2) + (a3)*(b3)) //
+macro curl3(u1,u2,u3) [dy(u3)-dz(u2), dz(u1)-dx(u3), dx(u2)-dy(u1)] //
+macro ndot(u1,u2,u3) (N.x*(u1) + N.y*(u2) + N.z*(u3)) //
+macro tangDot(u1,u2,u3,v1,v2,v3) (
+  ((u1)-N.x*ndot(u1,u2,u3))*((v1)-N.x*ndot(v1,v2,v3))
++ ((u2)-N.y*ndot(u1,u2,u3))*((v2)-N.y*ndot(v1,v2,v3))
++ ((u3)-N.z*ndot(u1,u2,u3))*((v3)-N.z*ndot(v1,v2,v3))
+) //
+
+func real isMatch4(int val, int a, int b, int c, int d) {
+  return (val == a) + (val == b) + (val == c) + (val == d);
+}
+
+func real isSMLabel(int lb) {
+  return isMatch4(lb, smLabel1, smLabel2, smLabel3, smLabel4);
+}
+
+func real epsrRegion(int r) {
+  real v = 1.0;
+  if (r == labSphereDielectric) v = epsSphere;
+  if (r == labLayer2) v = kappa;
+  if (r == labPTFE) v = epsPTFE;
+  if (r == labAlumina) v = epsAlumina;
+  if (r == labEps100) v = 100.0;
+  if (r == labEps1) v = 1.0;
+  if (r == labRodsHighEps) v = epsRods;
+  if (r == labLossy) v = epsLossy;
+  if (r == labHighK) v = kappa;
+  return v;
+}
+
+func real lossRegion(int r) {
+  real td = 0.0;
+  if (r == labLossyMaterial) td = tanDelta;
+  if (r == labLossy) td = vloss;
+  return td;
+}
+
+func real pmlSigmaRegion(int r) {
+  if (!usePML) return 0.0;
+  if (r == labPMLXP) return pmlSigma0;
+  if (r == labPMLXM) return pmlSigma0;
+  if (r == labPMLYP) return pmlSigma0;
+  if (r == labPMLYM) return pmlSigma0;
+  if (r == labPMLZP) return pmlSigma0;
+  if (r == labPMLZM) return pmlSigma0;
+  return 0.0;
+}
+
+macro epsEff() (
+  epsrRegion(region) * (1.0 - 1i * lossRegion(region))
++ 1i * pmlSigmaRegion(region) / (k0 + 1.0e-12)
+) //
+
+real x0 = srcX0;
+real ySrc = srcY0;
+real z0 = srcZ0;
+real srcWidthInv = 1.0 / max(srcWidth, 1.0e-8);
+
+func real srcProfile(real xx, real yy, real zz) {
+  real rx = (xx - x0) * srcWidthInv;
+  real ry = (yy - ySrc) * srcWidthInv;
+  real rz = (zz - z0) * srcWidthInv;
+  return exp(-(rx*rx + ry*ry + rz*rz));
+}
+
+varf aMaxwell([Ex, Ey, Ez], [Vx, Vy, Vz]) =
+    int3d(Th)(
+        dot3(
+            dy(Ez) - dz(Ey), dz(Ex) - dx(Ez), dx(Ey) - dy(Ex),
+            dy(Vz) - dz(Vy), dz(Vx) - dx(Vz), dx(Vy) - dy(Vx)
+        )
+      - (k0 * k0) * epsEff * dot3(Ex, Ey, Ez, Vx, Vy, Vz)
+    )
+  + int2d(Th)(
+        useSM * isSMLabel(label) * 1i * k0 * tangDot(Ex, Ey, Ez, Vx, Vy, Vz)
+    )
+  + on(pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+       pecLabel5, pecLabel6, pecLabel7, pecLabel8,
+       Ex = 0, Ey = 0, Ez = 0);
+
+varf lRhs([Ex, Ey, Ez], [Vx, Vy, Vz]) =
+    int3d(Th)(
+        srcAmp * srcProfile(x, y, z) * Vx
+    )
+  + on(pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+       pecLabel5, pecLabel6, pecLabel7, pecLabel8,
+       Ex = 0, Ey = 0, Ez = 0);
+
+A = aMaxwell(Eh, Eh);
+complex[int] b(Eh.ndof);
+b = lRhs(0, Eh);
+matrix<complex> Aloc = aMaxwell(Eh, Eh);
+
+real tMesh1 = clock();
+cout << "ASSEMBLY_TIME = " << (tMesh1 - tMesh0) << endl;
+cout << "NDOF = " << Eh.ndof << endl;
+
+Eh<complex> [Esolx, Esoly, Esolz];
+
+// ============================================================
+// NATIVE PETSc combos: GS, SSOR, AMG(GAMG) x GMRES, COCG (6 combos)
+// All scalar MatCreate -- must run before def/init are ever defined.
+// ============================================================
+{
+  cout << "COMBO_START preset=gs krylov=gmres" << endl;
+  set(A, sparams = nativeOptsGsGmres);
+  real t0 = clock(); Esolx[] = A^-1 * b; real t1 = clock();
+  cout << "SOLVE_TIME = " << (t1 - t0) << endl;
+  cout << "COMBO_END" << endl;
+}
+{
+  cout << "COMBO_START preset=gs krylov=cocg" << endl;
+  set(A, sparams = nativeOptsGsCocg);
+  real t0 = clock(); Esolx[] = A^-1 * b; real t1 = clock();
+  cout << "SOLVE_TIME = " << (t1 - t0) << endl;
+  cout << "COMBO_END" << endl;
+}
+{
+  cout << "COMBO_START preset=ssor krylov=gmres" << endl;
+  set(A, sparams = nativeOptsSsorGmres);
+  real t0 = clock(); Esolx[] = A^-1 * b; real t1 = clock();
+  cout << "SOLVE_TIME = " << (t1 - t0) << endl;
+  cout << "COMBO_END" << endl;
+}
+{
+  cout << "COMBO_START preset=ssor krylov=cocg" << endl;
+  set(A, sparams = nativeOptsSsorCocg);
+  real t0 = clock(); Esolx[] = A^-1 * b; real t1 = clock();
+  cout << "SOLVE_TIME = " << (t1 - t0) << endl;
+  cout << "COMBO_END" << endl;
+}
+{
+  cout << "COMBO_START preset=amg_gamg krylov=gmres" << endl;
+  set(A, sparams = nativeOptsAmgGmres);
+  real t0 = clock(); Esolx[] = A^-1 * b; real t1 = clock();
+  cout << "SOLVE_TIME = " << (t1 - t0) << endl;
+  cout << "COMBO_END" << endl;
+}
+{
+  cout << "COMBO_START preset=amg_gamg krylov=cocg" << endl;
+  set(A, sparams = nativeOptsAmgCocg);
+  real t0 = clock(); Esolx[] = A^-1 * b; real t1 = clock();
+  cout << "SOLVE_TIME = " << (t1 - t0) << endl;
+  cout << "COMBO_END" << endl;
+}
+
+// ============================================================
+// accel_ic: factorization built ONCE (no PETSc Mat, no def/init at all),
+// reused for both GMRES and COCG outer drivers.
+// ============================================================
+matrix<complex> aicA = Aloc;
+int aicN = Eh.ndof;
+real aicAlpha = accelIcAlpha;
+include "accel_ic_precon.idp"
+
+func complex[int] matvecShared(complex[int] & v) {
+  complex[int] y = Aloc * v;
+  return y;
+}
+func complex[int] preconAic(complex[int] & v) {
+  complex[int] z = accelICPrecon(v);
+  return z;
+}
+
+{
+  cout << "COMBO_START preset=accel_ic krylov=gmres" << endl;
+  func complex[int] matvec(complex[int] & v) { return matvecShared(v); }
+  func complex[int] precon(complex[int] & v) { return preconAic(v); }
+  int gmresN = Eh.ndof;
+  complex[int] gmresB(Eh.ndof); gmresB = b;
+  complex[int] gmresX(Eh.ndof); gmresX = 0.0;
+  real gmresRtol = outerRtol; int gmresMaxIt = accelIcMaxItGmres; int gmresRestart = gmresRestartCfg;
+  int gmresIterCount = 0; real gmresRelRes = 1.0; int gmresConverged = 0;
+  real t0 = clock();
+  include "gmres_precon.idp"
+  real t1 = clock();
+  cout << "SOLVE_TIME = " << (t1 - t0) << endl;
+  if (gmresConverged) cout << "Linear solve converged due to CONVERGED_RTOL iterations " << gmresIterCount << endl;
+  else cout << "Linear solve did not converge due to DIVERGED_ITS iterations " << gmresIterCount << endl;
+  cout << "COMBO_END" << endl;
+}
+{
+  cout << "COMBO_START preset=accel_ic krylov=cocg" << endl;
+  func complex[int] matvec(complex[int] & v) { return matvecShared(v); }
+  func complex[int] precon(complex[int] & v) { return preconAic(v); }
+  int cocgN = Eh.ndof;
+  complex[int] cocgB(Eh.ndof); cocgB = b;
+  complex[int] cocgX(Eh.ndof); cocgX = 0.0;
+  real cocgRtol = outerRtol; int cocgMaxIt = accelIcMaxItCocg;
+  int cocgIterCount = 0; real cocgRelRes = 1.0; int cocgConverged = 0;
+  real t0 = clock();
+  include "cocg_precon.idp"
+  real t1 = clock();
+  cout << "SOLVE_TIME = " << (t1 - t0) << endl;
+  if (cocgConverged) cout << "Linear solve converged due to CONVERGED_RTOL iterations " << cocgIterCount << endl;
+  else cout << "Linear solve did not converge due to DIVERGED_ITS iterations " << cocgIterCount << endl;
+  cout << "COMBO_END" << endl;
+}
+
+// ============================================================
+// CSLP: build P (scalar Edge03d MatCreate -- still before def/init exist).
+// Kept alive (not scoped away) so CSLP_HX below can reuse it directly.
+// ============================================================
+varf aMaxwellShift([Ex, Ey, Ez], [Vx, Vy, Vz]) =
+    int3d(Th)(
+        dot3(
+            dy(Ez) - dz(Ey), dz(Ex) - dx(Ez), dx(Ey) - dy(Ex),
+            dy(Vz) - dz(Vy), dz(Vx) - dx(Vz), dx(Vy) - dy(Vx)
+        )
+      - (k0 * k0) * (cslpBeta1 - 1i * cslpBeta2) * epsEff * dot3(Ex, Ey, Ez, Vx, Vy, Vz)
+    )
+  + int2d(Th)(
+        useSM * isSMLabel(label) * 1i * k0 * tangDot(Ex, Ey, Ez, Vx, Vy, Vz)
+    )
+  + on(pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+       pecLabel5, pecLabel6, pecLabel7, pecLabel8,
+       Ex = 0, Ey = 0, Ez = 0);
+
+Mat<complex> P;
+{
+  macro ThPkPart()Edge03ds0// EOM
+  MatCreate(Th, P, Pk);
+}
+P = aMaxwellShift(Eh, Eh);
+set(P, sparams = petscOptions);
+
+func complex[int] preconCslp(complex[int] & v) {
+  complex[int] z = P^-1 * v;
+  return z;
+}
+
+{
+  cout << "COMBO_START preset=cslp krylov=gmres" << endl;
+  func complex[int] matvec(complex[int] & v) { return matvecShared(v); }
+  func complex[int] precon(complex[int] & v) { return preconCslp(v); }
+  int gmresN = Eh.ndof;
+  complex[int] gmresB(Eh.ndof); gmresB = b;
+  complex[int] gmresX(Eh.ndof); gmresX = 0.0;
+  real gmresRtol = outerRtol; int gmresMaxIt = cslpMaxIt; int gmresRestart = gmresRestartCfg;
+  int gmresIterCount = 0; real gmresRelRes = 1.0; int gmresConverged = 0;
+  real t0 = clock();
+  include "gmres_precon.idp"
+  real t1 = clock();
+  cout << "SOLVE_TIME = " << (t1 - t0) << endl;
+  if (gmresConverged) cout << "Linear solve converged due to CONVERGED_RTOL iterations " << gmresIterCount << endl;
+  else cout << "Linear solve did not converge due to DIVERGED_ITS iterations " << gmresIterCount << endl;
+  cout << "COMBO_END" << endl;
+}
+
+// ============================================================
+// HX: hxDiagA/hxGLoc/hxMgrad are scalar (still safe, before def/init).
+// def/init defined ONCE here, immediately before hxMvec (first vector
+// MatCreate). Everything below this point may safely do vector MatCreate,
+// but NOT scalar MatCreate anymore.
+// ============================================================
+complex[int] hxDiagA(Aloc.n);
+{
+  int[int] hxI, hxJ;
+  complex[int] hxC;
+  [hxI, hxJ, hxC] = Aloc;
+  hxDiagA = 0.0;
+  for (int t = 0; t < hxI.n; t++) if (hxI[t] == hxJ[t]) hxDiagA[hxI[t]] = hxC[t];
+  real hxPivotFloor = 1.0e-12;
+  for (int i = 0; i < hxDiagA.n; i++)
+    if (abs(hxDiagA[i]) < hxPivotFloor) hxDiagA[i] = hxPivotFloor;
+}
+
+matrix hxGLoc;
+MatrixEdgeP1(hxGLoc, Th);
+
+func PkHxNode = P1;
+fespace HxPh(Th, PkHxNode);
+
+varf hxVMgrad(p, q) =
+    int3d(Th)( -(k0 * k0) * epsEff * (dx(p)*dx(q) + dy(p)*dy(q) + dz(p)*dz(q)) )
+  + on(pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+       pecLabel5, pecLabel6, pecLabel7, pecLabel8, p = 0);
+
+Mat<complex> hxMgrad;
+MatCreate(Th, hxMgrad, PkHxNode);
+hxMgrad = hxVMgrad(HxPh, HxPh);
+set(hxMgrad, sparams = petscOptions);
+
+int hxNEdge = hxGLoc.n;
+int hxNNode = hxGLoc.m;
+int[int] hxEdgeTail(hxNEdge), hxEdgeHead(hxNEdge);
+{
+  int[int] hxGI, hxGJ;
+  real[int] hxGC;
+  [hxGI, hxGJ, hxGC] = hxGLoc;
+  for (int t = 0; t < hxGI.n; t++) {
+    if (hxGI[t] >= hxNEdge || hxGJ[t] >= hxNNode) continue;
+    if (hxGC[t] < 0) hxEdgeTail[hxGI[t]] = hxGJ[t];
+    else hxEdgeHead[hxGI[t]] = hxGJ[t];
+  }
+}
+
+HxPh hxX = x, hxY = y, hxZ = z;
+
+int[int] hxPiRows(6 * hxNEdge + 1), hxPiCols(6 * hxNEdge + 1);
+real[int] hxPiVals(6 * hxNEdge + 1);
+{
+  int t = 0;
+  for (int e = 0; e < hxNEdge; e++) {
+    int n1 = hxEdgeTail[e], n2 = hxEdgeHead[e];
+    real ddx = hxX[][n2] - hxX[][n1];
+    real ddy = hxY[][n2] - hxY[][n1];
+    real ddz = hxZ[][n2] - hxZ[][n1];
+    hxPiRows[t] = e; hxPiCols[t] = 3*n1 + 0; hxPiVals[t] = ddx / 2.0; t += 1;
+    hxPiRows[t] = e; hxPiCols[t] = 3*n1 + 1; hxPiVals[t] = ddy / 2.0; t += 1;
+    hxPiRows[t] = e; hxPiCols[t] = 3*n1 + 2; hxPiVals[t] = ddz / 2.0; t += 1;
+    hxPiRows[t] = e; hxPiCols[t] = 3*n2 + 0; hxPiVals[t] = ddx / 2.0; t += 1;
+    hxPiRows[t] = e; hxPiCols[t] = 3*n2 + 1; hxPiVals[t] = ddy / 2.0; t += 1;
+    hxPiRows[t] = e; hxPiCols[t] = 3*n2 + 2; hxPiVals[t] = ddz / 2.0; t += 1;
+  }
+  hxPiRows[t] = 0; hxPiCols[t] = 3 * hxNNode - 1; hxPiVals[t] = 0.0;
+}
+matrix hxPi = [hxPiRows, hxPiCols, hxPiVals];
+
+// def/init defined exactly once, right before the first vector MatCreate.
+// NOTHING scalar may be MatCreate'd after this line for the rest of the run.
+macro def(i)[i, i#B, i#C]// EOM
+macro init(i)[i, i, i]// EOM
+func PkHxVec = [P1, P1, P1];
+fespace HxVh(Th, PkHxVec);
+
+varf hxVMvec(def(hxu), def(hxv)) =
+    int3d(Th)(
+        dot3(
+            dy(hxuC) - dz(hxuB), dz(hxu) - dx(hxuC), dx(hxuB) - dy(hxu),
+            dy(hxvC) - dz(hxvB), dz(hxv) - dx(hxvC), dx(hxvB) - dy(hxv)
+        )
+      - (k0 * k0) * epsEff * dot3(hxu, hxuB, hxuC, hxv, hxvB, hxvC)
+    )
+  + int2d(Th)(
+        useSM * isSMLabel(label) * 1i * k0 * tangDot(hxu, hxuB, hxuC, hxv, hxvB, hxvC)
+    )
+  + on(pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+       pecLabel5, pecLabel6, pecLabel7, pecLabel8,
+       hxu = 0, hxuB = 0, hxuC = 0);
+
+Mat<complex> hxMvec;
+MatCreate(Th, hxMvec, PkHxVec);
+hxMvec = hxVMvec(HxVh, HxVh);
+set(hxMvec, sparams = petscOptions, bs = 3);
+
+func complex[int] hxPrecon(complex[int] & r) {
+  complex[int] smoothed(r.n);
+  for (int i = 0; i < r.n; i++) smoothed[i] = hxSmootherOmega * r[i] / hxDiagA[i];
+  complex[int] rNode = hxGLoc' * r;
+  complex[int] pNode = hxMgrad^-1 * rNode;
+  complex[int] gradCorrection = hxGLoc * pNode;
+  complex[int] rVec = hxPi' * r;
+  complex[int] uVec = hxMvec^-1 * rVec;
+  complex[int] vecCorrection = hxPi * uVec;
+  complex[int] z(r.n);
+  z = smoothed; z += gradCorrection; z += vecCorrection;
+  return z;
+}
+
+{
+  cout << "COMBO_START preset=hx krylov=gmres" << endl;
+  func complex[int] matvec(complex[int] & v) { return matvecShared(v); }
+  func complex[int] precon(complex[int] & v) { complex[int] z = hxPrecon(v); return z; }
+  int gmresN = Eh.ndof;
+  complex[int] gmresB(Eh.ndof); gmresB = b;
+  complex[int] gmresX(Eh.ndof); gmresX = 0.0;
+  real gmresRtol = outerRtol; int gmresMaxIt = hxMaxIt; int gmresRestart = gmresRestartCfg;
+  int gmresIterCount = 0; real gmresRelRes = 1.0; int gmresConverged = 0;
+  real t0 = clock();
+  include "gmres_precon.idp"
+  real t1 = clock();
+  cout << "SOLVE_TIME = " << (t1 - t0) << endl;
+  if (gmresConverged) cout << "Linear solve converged due to CONVERGED_RTOL iterations " << gmresIterCount << endl;
+  else cout << "Linear solve did not converge due to DIVERGED_ITS iterations " << gmresIterCount << endl;
+  cout << "COMBO_END" << endl;
+}
+
+// ============================================================
+// CSLP_HX: reuses P (from CSLP) and hxGLoc/hxMgrad/hxPi (from HX) directly
+// -- they are IDENTICAL constructions (P is CSLP's own shifted matrix; the
+// gradient/topology pieces are unshifted in both HX and CSLP_HX). Only the
+// shifted vector Laplacian (MvecShift) is new; its MatCreate is safe here
+// since def/init are already active from the HX block above.
+// ============================================================
+varf cslpHxVMvecShift(def(cslpu), def(cslpv)) =
+    int3d(Th)(
+        dot3(
+            dy(cslpuC) - dz(cslpuB), dz(cslpu) - dx(cslpuC), dx(cslpuB) - dy(cslpu),
+            dy(cslpvC) - dz(cslpvB), dz(cslpv) - dx(cslpvC), dx(cslpvB) - dy(cslpv)
+        )
+      - (k0 * k0) * (cslpBeta1 - 1i * cslpBeta2) * epsEff * dot3(cslpu, cslpuB, cslpuC, cslpv, cslpvB, cslpvC)
+    )
+  + int2d(Th)(
+        useSM * isSMLabel(label) * 1i * k0 * tangDot(cslpu, cslpuB, cslpuC, cslpv, cslpvB, cslpvC)
+    )
+  + on(pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+       pecLabel5, pecLabel6, pecLabel7, pecLabel8,
+       cslpu = 0, cslpuB = 0, cslpuC = 0);
+
+Mat<complex> cslpHxMvecShift;
+MatCreate(Th, cslpHxMvecShift, PkHxVec);
+cslpHxMvecShift = cslpHxVMvecShift(HxVh, HxVh);
+set(cslpHxMvecShift, sparams = petscOptions, bs = 3);
+
+func complex[int] cslpHxPrecon(complex[int] & r) {
+  complex[int] fine = P^-1 * r;
+  complex[int] rNode = hxGLoc' * r;
+  complex[int] pNode = hxMgrad^-1 * rNode;
+  complex[int] gradCorrection = hxGLoc * pNode;
+  complex[int] rVec = hxPi' * r;
+  complex[int] uVec = cslpHxMvecShift^-1 * rVec;
+  complex[int] vecCorrection = hxPi * uVec;
+  complex[int] z(r.n);
+  z = fine; z += gradCorrection; z += vecCorrection;
+  return z;
+}
+
+{
+  cout << "COMBO_START preset=cslp_hx krylov=gmres" << endl;
+  func complex[int] matvec(complex[int] & v) { return matvecShared(v); }
+  func complex[int] precon(complex[int] & v) { complex[int] z = cslpHxPrecon(v); return z; }
+  int gmresN = Eh.ndof;
+  complex[int] gmresB(Eh.ndof); gmresB = b;
+  complex[int] gmresX(Eh.ndof); gmresX = 0.0;
+  real gmresRtol = outerRtol; int gmresMaxIt = cslpHxMaxIt; int gmresRestart = gmresRestartCfg;
+  int gmresIterCount = 0; real gmresRelRes = 1.0; int gmresConverged = 0;
+  real t0 = clock();
+  include "gmres_precon.idp"
+  real t1 = clock();
+  cout << "SOLVE_TIME = " << (t1 - t0) << endl;
+  if (gmresConverged) cout << "Linear solve converged due to CONVERGED_RTOL iterations " << gmresIterCount << endl;
+  else cout << "Linear solve did not converge due to DIVERGED_ITS iterations " << gmresIterCount << endl;
+  cout << "COMBO_END" << endl;
+}
+
+cout << "ALL_COMBOS_DONE" << endl;

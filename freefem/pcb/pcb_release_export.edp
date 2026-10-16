@@ -1,0 +1,102 @@
+// Export of the released linear systems (paper 2, chapter 7; release_data.py).
+// Assembles, exactly as maxwell_pcb_solver.edp and solution_check.idp:
+//   A     aMaxwell of pcb_common.idp (material, UPML, Silver-Mueller, lumped-port
+//         and SIBC terms, PEC by on() penalty)
+//   b     the right-hand side of the single-RHS run (E2: lPort of pcb_port.idp,
+//         E1: the Gaussian volume source lRhs, copied from maxwell_pcb_solver.edp)
+//   N     k0^2 M0 + K0, the H(curl) norm of solution_check.idp (eps = 1, no
+//         UPML stretching, no PEC penalty: integrals over the whole mesh)
+//   G     the discrete gradient (edges x P1 nodes, MatrixEdgeP1, the numbering of A)
+//   XYZ   the P1 node coordinates (to match the nodes with the mesh file)
+// No solve. Writes each matrix as one float64 vector [n, m, nnz, I (0-based), J,
+// Re, Im] and each vector as [n, Re..., Im...] (BinaryIO SaveVec) to the job
+// directory: A.bin, b.bin, N.bin, G.bin, xyz.bin.
+//
+// Expects runtime_case_config.idp and pcb_case_config.idp (run_pcb_benchmark.py).
+
+load "msh3"
+load "gmsh"
+load "Element_Mixte3d"
+load "mat_edgeP1"
+load "BinaryIO"
+
+include "runtime_case_config.idp"
+include "pcb_case_config.idp"
+
+mesh3 Th = gmshload3(meshFile);
+fespace Eh(Th, Edge03d);
+cout << "NDOF = " << Eh.ndof << endl;
+include "pcb_common.idp"
+
+macro writeCoo(file, Mat, T)
+{
+  int[int] cooI(1), cooJ(1);
+  T[int] cooC(1);
+  [cooI, cooJ, cooC] = Mat;
+  int nz = cooI.n;
+  real[int] buf(3 + 4 * nz);
+  buf[0] = Mat.n; buf[1] = Mat.m; buf[2] = nz;
+  for (int k = 0; k < nz; k++) {
+    buf[3 + k] = cooI[k]; buf[3 + nz + k] = cooJ[k];
+    buf[3 + 2 * nz + k] = real(cooC[k]); buf[3 + 3 * nz + k] = imag(cooC[k]);
+  }
+  SaveVec(buf, file);
+  cout << "WROTE " << file << " " << Mat.n << " x " << Mat.m << " nnz " << nz << endl;
+}
+// EOM
+
+matrix<complex> A = aMaxwell(Eh, Eh);
+writeCoo("A.bin", A, complex)
+
+// right-hand side, as maxwell_pcb_solver.edp
+real srcWidthInv = 1.0 / max(srcWidth, 1.0e-8);
+varf lRhs([Ex, Ey, Ez], [Vx, Vy, Vz]) =
+    int3d(Th)( srcAmp * exp(-(square((x - srcX0) * srcWidthInv) + square((y - srcY0) * srcWidthInv)
+                              + square((z - srcZ0) * srcWidthInv)))
+               * (srcDirX * Vx + srcDirY * Vy + srcDirZ * Vz) )
+  + on(pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+       pecLabel5, pecLabel6, pecLabel7, pecLabel8,
+       Ex = 0, Ey = 0, Ez = 0);
+include "pcb_port.idp"
+complex[int] b(Eh.ndof);
+if (excitation == "E2") {
+  if (excitedPort < 1 || excitedPort > nPorts) {
+    cout << "ERROR: E2 excitation needs 1 <= excitedPort <= nPorts" << endl;
+    exit(1);
+  }
+  b = lPort(0, Eh);
+} else {
+  b = lRhs(0, Eh);
+}
+{
+  real[int] buf(1 + 2 * b.n);
+  buf[0] = b.n;
+  for (int i = 0; i < b.n; i++) { buf[1 + i] = real(b[i]); buf[1 + b.n + i] = imag(b[i]); }
+  SaveVec(buf, "b.bin");
+  cout << "WROTE b.bin " << b.n << " RHS_NORM " << b.l2 << endl;
+}
+
+// H(curl) norm matrix of solution_check.idp
+varf vN([Ex, Ey, Ez], [Vx, Vy, Vz]) =
+    int3d(Th)( (dy(Ez) - dz(Ey)) * (dy(Vz) - dz(Vy)) + (dz(Ex) - dx(Ez)) * (dz(Vx) - dx(Vz))
+             + (dx(Ey) - dy(Ex)) * (dx(Vy) - dy(Vx))
+             + k0 * k0 * (Ex * Vx + Ey * Vy + Ez * Vz) );
+matrix<complex> N = vN(Eh, Eh);
+writeCoo("N.bin", N, complex)
+
+matrix Gr;
+MatrixEdgeP1(Gr, Th);
+matrix<complex> G = Gr;
+writeCoo("G.bin", G, complex)
+
+{
+  real[int] buf(1 + 3 * Th.nv);
+  buf[0] = Th.nv;
+  for (int i = 0; i < Th.nv; i++) {
+    buf[1 + 3 * i] = Th(i).x; buf[2 + 3 * i] = Th(i).y; buf[3 + 3 * i] = Th(i).z;
+  }
+  SaveVec(buf, "xyz.bin");
+}
+cout.precision(17);
+cout << "K0 " << k0 << endl;
+cout << "EXPORT_DONE" << endl;

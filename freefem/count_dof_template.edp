@@ -1,0 +1,9 @@
+load "msh3"
+load "gmsh"
+load "Element_Mixte3d"
+
+string meshFile = "__MESHFILE__";
+mesh3 Th = gmshload3(meshFile);
+func Pk = Edge03d;
+fespace Eh(Th, Pk);
+cout << "NDOF_RESULT " << meshFile << " " << Eh.ndof << " nt=" << Th.nt << " nv=" << Th.nv << endl;

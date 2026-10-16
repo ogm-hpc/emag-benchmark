@@ -1,0 +1,22 @@
+// Multiple right-hand sides with the PETSc KSP of the combination (pcb_mrhs.idp,
+// method "shared" only): the operator and the preconditioner (e.g. the MUMPS
+// factorization) are set up at the first solve and reused by the next ones.
+// The KSP prints its own residual lines (one history per solve).
+{
+  if (mrhsMethod != "shared") {
+    cout << "ERROR: mrhsMethod " << mrhsMethod << " needs a hand-rolled GMRES combination" << endl;
+    exit(1);
+  }
+  real tSolve0 = clock();   // (PHASE setup_done printed by the KSP branch)
+  for (int q = 0; q < mrhsNrhs; q++) {
+    real tq = clock();
+    mrhsX[q] = A^-1 * mrhsB[q];
+    complex[int] rq = A * mrhsX[q];
+    rq = mrhsB[q] - rq;
+    real rel = rq.l2 / mrhsBnorm[q];
+    int convq = (rel <= 10.0 * outerRtol);
+    if (!convq) mrhsAllConv = 0;
+    cout << "MRHS_DONE " << (q + 1) << " -1 " << (clock() - tq) << " " << rel << " " << convq << endl;
+  }
+  cout << "SOLVE_TIME = " << (clock() - tSolve0) << endl;
+}

@@ -1,0 +1,98 @@
+// Mesh convergence (docs/paper_plan.md B6, mesh_convergence.py): the
+// difference between a solution on a coarser mesh and the one on the finest
+// mesh of the same set, evaluated on the finest mesh (the coarse field and its
+// curl are evaluated at the quadrature points of the fine mesh; no
+// interpolation). No solve; the solver is not used.
+//
+//   FreeFem++-mpi -nw -v 0 pcb_mesh_convergence.edp -fm fine.msh -fs fine.sol
+//       -cm coarse.msh -cs coarse.sol -k0 6.2832 -core 1,
+//
+// Solutions: solution_check.idp format (ndof, then "re im" per DOF, Edge03d
+// on the mesh as gmshload3 reads it). -core: volume labels of the physical
+// region (without the UPML layers), comma separated; empty = whole mesh.
+// -cs "" checks the reading only (norms of the fine solution).
+// Output:
+//   MESHCONV_REF ndof <n> l2 <..> curl <..> l2core <..> curlcore <..>
+//   MESHCONV_ERR ndof <nc> l2 <..> curl <..> hcurl <..> l2core <..> curlcore <..> hcurlcore <..>
+// (relative to the fine solution; norms with conjugation, as solution_check.idp)
+load "msh3"
+load "gmsh"
+include "getARGV.idp"
+
+string fineMesh = getARGV("-fm", "");
+string fineSol = getARGV("-fs", "");
+string coarseMesh = getARGV("-cm", "");
+string coarseSol = getARGV("-cs", "");
+real k0 = getARGV("-k0", 0.0);
+string coreText = getARGV("-core", "");
+
+func int readSol(string file, complex[int] & v) {
+  ifstream fi(file);
+  int n;
+  fi >> n;
+  if (n != v.n) {
+    cout << "MESHCONV_FAILED ndof " << v.n << " file " << file << " " << n << endl;
+    exit(1);
+  }
+  for (int i = 0; i < n; i++) {
+    real vr, vi;
+    fi >> vr >> vi;
+    v[i] = vr + 1i * vi;
+  }
+  return n;
+}
+
+mesh3 Tf = gmshload3(fineMesh);
+fespace Ef(Tf, Edge03d);
+fespace Pf0(Tf, P03d);
+Ef<complex> [fx, fy, fz];
+readSol(fineSol, fx[]);
+
+// indicator of the core volumes on the fine mesh
+Pf0 chi = 1;
+if (coreText != "") {
+  chi = 0;
+  int p = 0;
+  while (p < coreText.length) {
+    int q = coreText.find(",", p);
+    if (q < 0) q = coreText.length;
+    if (q > p) {
+      int lab = atoi(coreText(p:q - 1));
+      chi = chi + (region == lab);
+    }
+    p = q + 1;
+  }
+}
+
+macro sq(ux, uy, uz) (square(abs(ux)) + square(abs(uy)) + square(abs(uz))) //
+macro curlSq(ux, uy, uz) (square(abs(dy(uz) - dz(uy))) + square(abs(dz(ux) - dx(uz)))
+                          + square(abs(dx(uy) - dy(ux)))) //
+real refL2 = int3d(Tf)(sq(fx, fy, fz));
+real refCurl = int3d(Tf)(curlSq(fx, fy, fz));
+real refL2c = int3d(Tf)(chi * sq(fx, fy, fz));
+real refCurlc = int3d(Tf)(chi * curlSq(fx, fy, fz));
+cout.precision(10);
+cout << "MESHCONV_REF ndof " << Ef.ndof << " l2 " << sqrt(refL2) << " curl " << sqrt(refCurl)
+     << " l2core " << sqrt(refL2c) << " curlcore " << sqrt(refCurlc) << endl;
+
+if (coarseSol != "") {
+  mesh3 Tc = gmshload3(coarseMesh);
+  fespace Ec(Tc, Edge03d);
+  Ec<complex> [cx, cy, cz];
+  readSol(coarseSol, cx[]);
+  // e = coarse - fine at the fine quadrature points
+  real eL2 = int3d(Tf)(sq(cx - fx, cy - fy, cz - fz));
+  real eCurl = int3d(Tf)(square(abs((dy(cz) - dz(cy)) - (dy(fz) - dz(fy))))
+                         + square(abs((dz(cx) - dx(cz)) - (dz(fx) - dx(fz))))
+                         + square(abs((dx(cy) - dy(cx)) - (dx(fy) - dy(fx)))));
+  real eL2c = int3d(Tf)(chi * sq(cx - fx, cy - fy, cz - fz));
+  real eCurlc = int3d(Tf)(chi * (square(abs((dy(cz) - dz(cy)) - (dy(fz) - dz(fy))))
+                                 + square(abs((dz(cx) - dx(cz)) - (dz(fx) - dx(fz))))
+                                 + square(abs((dx(cy) - dy(cx)) - (dx(fy) - dy(fx))))));
+  real k02 = k0 * k0;
+  cout << "MESHCONV_ERR ndof " << Ec.ndof
+       << " l2 " << sqrt(eL2 / refL2) << " curl " << sqrt(eCurl / refCurl)
+       << " hcurl " << sqrt((k02 * eL2 + eCurl) / (k02 * refL2 + refCurl))
+       << " l2core " << sqrt(eL2c / refL2c) << " curlcore " << sqrt(eCurlc / refCurlc)
+       << " hcurlcore " << sqrt((k02 * eL2c + eCurlc) / (k02 * refL2c + refCurlc)) << endl;
+}

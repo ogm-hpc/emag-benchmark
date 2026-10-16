@@ -1,0 +1,258 @@
+// Sequential solves of the right-hand sides (pcb_mrhs.idp), methods "shared"
+// and "gcro". Uses func matvec / func precon of the solver branch.
+//
+// shared, GMRES: restarted flexible GMRES(m) as gmres_precon.idp (modified
+//   Gram-Schmidt, complex Givens rotations, the preconditioned vectors Z kept),
+//   once per right-hand side, zero initial guess.
+// shared, COCG: COCG as cocg_precon.idp, once per right-hand side.
+// gcro: the same flexible GMRES on the operator deflated by a recycle space
+//   (GCRO-DR type: Parks, de Sturler, Mackey, Johnson, Maiti, SIAM J. Sci.
+//   Comput. 28 (2006); flexible: Carvalho, Gratton, Lago, Vasseur, Numer.
+//   Linear Algebra Appl. 18 (2011)). The recycle space is kept as pairs
+//   (U_i, C_i) with A*U = C and C^H*C = I (here A is the operator, the
+//   preconditioner is inside U):
+//     start   x = U*C^H*b, r = b - C*C^H*b
+//     Arnoldi w = A*z_j, B(:,j) = C^H*w, w = w - C*B(:,j), then MGS on V
+//     update  x = x + Z*y - U*(B*y), y the GMRES least-squares solution
+//   so that the residual stays orthogonal to C and its norm is the GMRES
+//   estimate. After each right-hand side, the mrhsRecycle harmonic Ritz
+//   vectors of the last cycle with the smallest harmonic Ritz values (of the
+//   deflated operator, from its Hessenberg matrix) are added:
+//     U_new = Z*P - U*(B*P),  C_new = V*Hbar*P,  then C_new orthonormalized
+//     (the same operations on U_new keep A*U = C);
+//   once mrhsRecycleMax vectors are reached the space is kept as it is (no
+//   vectors replaced: dropping the oldest ones, from the first solve, made
+//   the next solves as slow as the first on P08-N4_s1). This is a
+//   simplified GCRO-DR: the recycle space is only augmented between
+//   right-hand sides, not recomputed from the full augmented system within a
+//   solve.
+{
+  int n = Eh.ndof;
+  int m = gmresRestartCfg;
+  int useRecycle = (mrhsMethod == "gcro");
+  int kAdd = useRecycle ? mrhsRecycle : 0;
+  int kMax = useRecycle ? mrhsRecycleMax : 0;
+  int kc = 0;                                  // current recycle-space dimension
+  complex[int][int] Ur(max(kMax, 1)), Cr(max(kMax, 1));
+  for (int i = 0; i < kMax; i++) { Ur[i].resize(n); Cr[i].resize(n); }
+  complex[int,int] Bc(max(kMax, 1), m);         // C^H * A * z_j of the current cycle
+
+  complex[int][int] V(m + 1), Z(m);
+  if (krylovMethod == "gmres") {
+    for (int j = 0; j <= m; j++) V[j].resize(n);
+    for (int j = 0; j < m; j++) Z[j].resize(n);
+  }
+  complex[int,int] H(m + 1, m), H0(m + 1, m);   // H0: Hessenberg before the rotations
+  real[int] cs(m);
+  complex[int] sn(m), g(m + 1);
+
+  for (int q = 0; q < mrhsNrhs; q++) {
+    real tq = clock();
+    int itq = 0, convq = 0;
+    real beta0 = mrhsBnorm[q];
+    complex[int] x(n), r(n);
+    x = 0.0;
+    r = mrhsB[q];
+    if (krylovMethod == "cocg") {
+      // ---------------------------------------------------------------- COCG
+      complex[int] tmp(n), z(n), p(n);
+      z = precon(r);
+      p = z;
+      tmp = r .* z;
+      complex rho = tmp.sum;
+      real breakdownEps = 1.0e-14;
+      bool broke = (abs(rho) < breakdownEps * r.l2 * z.l2);
+      while (itq < outerMaxIt && !convq && !broke) {
+        complex[int] qv = matvec(p);
+        mrhsMv++;
+        tmp = p .* qv;
+        complex pAp = tmp.sum;
+        if (abs(pAp) < breakdownEps * p.l2 * qv.l2) { broke = true; break; }
+        complex alpha = rho / pAp;
+        x += alpha * p;
+        r -= alpha * qv;
+        itq++;
+        cout << mrhsMv << " KSP Residual norm " << r.l2 / beta0 << endl;
+        if (r.l2 / beta0 <= outerRtol) { convq = 1; break; }
+        z = precon(r);
+        tmp = r .* z;
+        complex rhoNew = tmp.sum;
+        if (abs(rhoNew) < breakdownEps * r.l2 * z.l2) { broke = true; break; }
+        p = z + (rhoNew / rho) * p;
+        rho = rhoNew;
+      }
+      if (broke && !convq) cout << "COCG breakdown at right-hand side " << (q + 1) << endl;
+    } else {
+      // ------------------------------------------------- (deflated) FGMRES(m)
+      if (kc > 0) {
+        for (int i = 0; i < kc; i++) {
+          complex c = Cr[i]' * r;
+          x += c * Ur[i];
+          r -= c * Cr[i];
+        }
+      }
+      int mDim = 0;
+      while (itq < outerMaxIt && !convq) {
+        real beta = r.l2;
+        if (beta / beta0 <= outerRtol) { convq = 1; break; }
+        V[0] = r;
+        V[0] /= beta;
+        g = 0.0;
+        g[0] = beta;
+        H = 0.0;
+        H0 = 0.0;
+        mDim = 0;
+        for (int j = 0; j < m && itq < outerMaxIt; j++) {
+          Z[j] = precon(V[j]);
+          complex[int] w = matvec(Z[j]);
+          mrhsMv++;
+          for (int i = 0; i < kc; i++) {
+            complex c = Cr[i]' * w;
+            Bc(i, j) = c;
+            w -= c * Cr[i];
+          }
+          for (int i = 0; i <= j; i++) {
+            complex hij = V[i]' * w;
+            H(i, j) = hij;
+            w -= hij * V[i];
+          }
+          real hjp1 = w.l2;
+          H(j + 1, j) = hjp1;
+          if (hjp1 > 1.0e-13) {
+            V[j + 1] = w;
+            V[j + 1] /= hjp1;
+          }
+          for (int i = 0; i <= j + 1; i++) H0(i, j) = H(i, j);
+          for (int i = 0; i < j; i++) {
+            complex temp = cs[i] * H(i, j) + sn[i] * H(i + 1, j);
+            H(i + 1, j) = -conj(sn[i]) * H(i, j) + cs[i] * H(i + 1, j);
+            H(i, j) = temp;
+          }
+          complex a = H(j, j);
+          complex bb = H(j + 1, j);
+          real da = abs(a);
+          real absb = abs(bb);
+          real denom = sqrt(da * da + absb * absb);
+          real csj; complex snj;
+          if (denom < 1.0e-300) { csj = 1.0; snj = 0.0; }
+          else if (da < 1.0e-300) { csj = 0.0; snj = 1.0; }
+          else {
+            complex alpha = a / da;
+            csj = da / denom;
+            snj = alpha * conj(bb) / denom;
+          }
+          cs[j] = csj;
+          sn[j] = snj;
+          H(j, j) = csj * a + snj * bb;
+          H(j + 1, j) = 0.0;
+          complex gTemp = csj * g[j];
+          g[j + 1] = -conj(snj) * g[j];
+          g[j] = gTemp;
+          itq++;
+          mDim = j + 1;
+          real rel = abs(g[j + 1]) / beta0;
+          cout << mrhsMv << " KSP Residual norm " << rel << endl;
+          if (rel <= outerRtol) { convq = 1; break; }
+        }
+        complex[int] y(mDim);
+        for (int i = mDim - 1; i >= 0; i--) {
+          complex s = g[i];
+          for (int k = i + 1; k < mDim; k++) s -= H(i, k) * y[k];
+          y[i] = s / H(i, i);
+        }
+        for (int k = 0; k < mDim; k++) x += y[k] * Z[k];
+        for (int i = 0; i < kc; i++) {
+          complex s = 0.0;
+          for (int k = 0; k < mDim; k++) s += Bc(i, k) * y[k];
+          x -= s * Ur[i];
+        }
+        if (!convq) {
+          // restart from the true residual, deflated again
+          r = matvec(x);
+          r = mrhsB[q] - r;
+          for (int i = 0; i < kc; i++) {
+            complex c = Cr[i]' * r;
+            x += c * Ur[i];
+            r -= c * Cr[i];
+          }
+        }
+      }
+      // -------------------------------- recycle space: augment after this solve
+      if (useRecycle && kAdd > 0 && mDim > kAdd + 1 && kc < kMax) {
+        int md = mDim;
+        // harmonic Ritz values/vectors of Hbar (md+1 x md):
+        // (H_md + |h|^2 f e_md^T) p = theta p,  f = H_md^{-H} e_md
+        complex[int,int] Hm(md, md), HmH(md, md), Mh(md, md), W(md, md);
+        for (int i = 0; i < md; i++)
+          for (int k = 0; k < md; k++) {
+            Hm(i, k) = H0(i, k);
+            HmH(i, k) = conj(H0(k, i));
+          }
+        inv(HmH);
+        real hh = square(abs(H0(md, md - 1)));
+        Mh = Hm;
+        for (int i = 0; i < md; i++) Mh(i, md - 1) += hh * HmH(i, md - 1);
+        complex[int] ev(md);
+        int info = zgeev(Mh, ev, W);
+        // the kAdd harmonic Ritz values of smallest modulus
+        real[int] av(md);
+        int[int] idx(md);
+        for (int i = 0; i < md; i++) { av[i] = abs(ev[i]); idx[i] = i; }
+        sort(av, idx);
+        // a full recycle space is kept as it is (see the header)
+        int kNew = min(kAdd, kMax - kc);
+        // P = W(:, idx[0..kNew-1]);  Y = Hbar * P ((md+1) x kNew);  BP = B * P (kc x kNew)
+        complex[int,int] P(md, kNew), Y(md + 1, kNew), BP(max(kc, 1), kNew);
+        for (int t = 0; t < kNew; t++)
+          for (int i = 0; i < md; i++) P(i, t) = W(i, idx[t]);
+        Y = 0.0;
+        for (int t = 0; t < kNew; t++)
+          for (int i = 0; i <= md; i++) {
+            complex s = 0.0;
+            for (int k = 0; k < md; k++) s += H0(i, k) * P(k, t);
+            Y(i, t) = s;
+          }
+        for (int t = 0; t < kNew; t++)
+          for (int i = 0; i < kc; i++) {
+            complex s = 0.0;
+            for (int k = 0; k < md; k++) s += Bc(i, k) * P(k, t);
+            BP(i, t) = s;
+          }
+        // new pairs with the full old space: A*un = cn (= V*Hbar*p, orthogonal to C)
+        complex[int][int] Un(kNew), Cn(kNew);
+        for (int t = 0; t < kNew; t++) {
+          Un[t].resize(n);
+          Cn[t].resize(n);
+          Un[t] = 0.0;
+          Cn[t] = 0.0;
+          for (int k = 0; k < md; k++) Un[t] += P(k, t) * Z[k];
+          for (int i = 0; i < kc; i++) Un[t] -= BP(i, t) * Ur[i];
+          for (int i = 0; i <= md; i++) Cn[t] += Y(i, t) * V[i];
+        }
+        // orthonormalize the new C against C (old and new), same operations on U
+        for (int t = 0; t < kNew; t++) {
+          for (int i = 0; i < kc; i++) {
+            complex c = Cr[i]' * Cn[t];
+            Cn[t] -= c * Cr[i];
+            Un[t] -= c * Ur[i];
+          }
+          real nc = Cn[t].l2;
+          if (nc < 1.0e-12) continue;
+          Cr[kc] = Cn[t];
+          Cr[kc] /= nc;
+          Ur[kc] = Un[t];
+          Ur[kc] /= nc;
+          kc++;
+        }
+        cout << "MRHS_RECYCLE " << (q + 1) << " dim " << kc << " zgeev " << info
+             << " theta_min " << av[0] << " theta_k " << av[max(kAdd - 1, 0)] << endl;
+      }
+    }
+    if (!convq) mrhsAllConv = 0;
+    mrhsX[q] = x;
+    complex[int] rt = matvec(x);
+    rt = mrhsB[q] - rt;
+    cout << "MRHS_DONE " << (q + 1) << " " << itq << " " << (clock() - tq) << " " << rt.l2 / beta0
+         << " " << convq << endl;
+  }
+}

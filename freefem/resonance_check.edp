@@ -1,0 +1,45 @@
+// Resonance-proximity check: the discrete modes nearest to the operating k0.
+//
+// Solves the generalized eigenproblem  K u = lambda M u  (lambda = k^2) of the
+// SAME discrete operator the benchmark solves (A = K - k0^2 M, from
+// maxwell_common.idp: material eps, UPML tensors and Silver-Mueller term frozen
+// at k0), by ARPACK shift-invert around sigma = k0^2, and reports the modes
+// closest to k0. |k_mode - k0| / k0 small  ->  A is nearly singular at k0.
+// For open (PML/SM) problems the modes are complex; Im(k)/Re(k) ~ 1/(2Q).
+//
+// Expects runtime_case_config.idp (written by resonance_check.py).
+load "msh3"
+load "gmsh"
+load "MUMPS_seq"   // sparsesolver -> MUMPS (UMFPACK runs out of workspace above ~0.1M DOF)
+include "runtime_case_config.idp"
+include "getARGV.idp"
+k0 = k0 * getARGV("-k0scale", 1.0);   // probe a shifted operating point
+
+mesh3 Th = gmshload3(meshFile);
+fespace Eh(Th, Edge03d);
+cout << "NDOF = " << Eh.ndof << endl;
+include "maxwell_common.idp"
+
+complex sigma = k0 * k0;
+varf vOP([Ex, Ey, Ez], [Vx, Vy, Vz]) =
+    int3d(Th)( curlTerm(Ex, Ey, Ez, Vx, Vy, Vz) - sigma * massTerm(Ex, Ey, Ez, Vx, Vy, Vz) )
+  + int2d(Th)( useSM * isSMLabel(label) * 1i * k0 * tangDot(Ex, Ey, Ez, Vx, Vy, Vz) )
+  + on(pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+       pecLabel5, pecLabel6, pecLabel7, pecLabel8, Ex = 0, Ey = 0, Ez = 0);
+varf vM([Ex, Ey, Ez], [Vx, Vy, Vz]) = int3d(Th)( massTerm(Ex, Ey, Ez, Vx, Vy, Vz) );
+
+matrix<complex> OP = vOP(Eh, Eh, solver = sparsesolver);
+matrix<complex> B = vM(Eh, Eh);
+
+int nev = getARGV("-nev", 6);
+complex[int] ev(nev);
+int nconv = EigenValue(OP, B, nev = nev, sigma = sigma, value = ev, tol = 1e-8,
+                       maxit = getARGV("-maxit", 0), ncv = getARGV("-ncv", 0));
+cout << "NCONV " << nconv << endl;
+for (int i = 0; i < min(nconv, nev); i++) {
+  complex km = sqrt(ev[i]);
+  if (real(km) < 0) km = -km;
+  cout << "MODE " << i << " k_re " << real(km) << " k_im " << imag(km)
+       << " reldist " << abs(km - k0) / k0 << endl;
+}
+cout << "K0 " << k0 << endl;

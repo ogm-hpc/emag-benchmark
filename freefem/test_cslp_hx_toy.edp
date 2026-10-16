@@ -1,0 +1,180 @@
+// Validate the combined CSLP+3-term-HX preconditioner (cslp_hx_precon.idp)
+// against standalone CSLP and standalone 3-term HX on the SAME toy problem
+// (cube(5,5,5), generic Gaussian-source RHS -- the same realistic test that
+// decisively validated HX earlier in test_hx_toy.edp). Builds all pieces
+// (P, G, Mgrad, Pi, MvecShift) ONCE via cslp_hx_precon.idp, then composes
+// three different precon functions from them for a fair, apples-to-apples
+// 3-way comparison:
+//   (a) CSLP alone:    P^-1 * r
+//   (b) HX alone:       G*(Mgrad^-1*(G^T*r)) + Pi*(MvecShift^-1*(Pi^T*r))
+//   (c) CSLP+HX:        P^-1*r + G*(Mgrad^-1*(G^T*r)) + Pi*(MvecShift^-1*(Pi^T*r))
+// Expect (c) to be no worse than the better of (a)/(b), ideally better.
+// Note "HX alone" here uses MvecShift (shifted), not the pure-unshifted
+// Mvec from hx_precon.idp -- this isolates the shift's own effect within
+// this test rather than mixing it with the CSLP P-vs-Jacobi difference.
+
+load "msh3"
+load "PETSc-complex"
+load "Element_Mixte3d"
+macro dimension()3// EOM
+include "macro_ddm.idp"
+
+mesh3 Th = cube(5, 5, 5);
+func Pk = Edge03d;
+fespace Eh(Th, Pk);
+
+macro dot3(a1,a2,a3,b1,b2,b3) ((a1)*(b1) + (a2)*(b2) + (a3)*(b3)) //
+macro ndot(u1,u2,u3) (N.x*(u1) + N.y*(u2) + N.z*(u3)) //
+macro tangDot(u1,u2,u3,v1,v2,v3) (
+  ((u1)-N.x*ndot(u1,u2,u3))*((v1)-N.x*ndot(v1,v2,v3))
++ ((u2)-N.y*ndot(u1,u2,u3))*((v2)-N.y*ndot(v1,v2,v3))
++ ((u3)-N.z*ndot(u1,u2,u3))*((v3)-N.z*ndot(v1,v2,v3))
+) //
+macro epsEff() (1.0) //   // toy test: constant eps=1, no loss/PML
+func real isSMLabel(int lb) { return 0; }
+int useSM = 0;
+
+real k0 = 2.0 * pi;
+
+Mat<complex> A;
+int[int] n2o;
+macro ThN2O()n2o// EOM
+DmeshCreate(Th);
+{
+  macro ThPkPart()Edge03ds0// EOM
+  MatCreate(Th, A, Pk);
+}
+
+varf aMaxwell([Ex, Ey, Ez], [Vx, Vy, Vz]) =
+    int3d(Th)(
+        dot3(
+            dy(Ez) - dz(Ey), dz(Ex) - dx(Ez), dx(Ey) - dy(Ex),
+            dy(Vz) - dz(Vy), dz(Vx) - dx(Vz), dx(Vy) - dy(Vx)
+        )
+      - (k0 * k0) * epsEff * dot3(Ex, Ey, Ez, Vx, Vy, Vz)
+    )
+  + on(1, 2, 3, 4, 5, 6, Ex = 0, Ey = 0, Ez = 0);
+
+matrix<complex> Aloc = aMaxwell(Eh, Eh);
+
+// Config globals cslp_hx_precon.idp / hx_precon.idp expect.
+string petscOptions = "-ksp_type gmres -pc_type gamg -ksp_rtol 1e-2 -ksp_max_it 20";
+real cslpBeta1 = 1.0, cslpBeta2 = 0.5;
+real hxSmootherOmega = 1.0;
+int pecLabel1 = 1, pecLabel2 = 2, pecLabel3 = 3, pecLabel4 = 4,
+    pecLabel5 = 5, pecLabel6 = 6, pecLabel7 = -1, pecLabel8 = -1;
+
+// NOTE: hx_precon.idp and cslp_hx_precon.idp both define global def()/init()
+// macros (required by macro_ddm.idp's internal machinery for any vector-
+// fespace MatCreate call) -- including BOTH in the same script causes
+// macro pollution (the vector-space def/init leaks into later scalar/edge
+// MatCreate calls and breaks them). So this test builds its own local
+// Jacobi diagonal (matching hxDiagA's construction) instead of also
+// including hx_precon.idp, and uses ONLY cslp_hx_precon.idp's pieces
+// (P, G/Mgrad, Pi/MvecShift) for all three comparisons below -- isolating
+// exactly the question this combination is meant to answer: does replacing
+// the Jacobi smoother with P help, given the SAME (shifted) auxiliary
+// corrections either way?
+include "cslp_hx_precon.idp"
+
+complex[int] cslpTestDiagA(Aloc.n);
+{
+  int[int] dI, dJ;
+  complex[int] dC;
+  [dI, dJ, dC] = Aloc;
+  cslpTestDiagA = 0.0;
+  for (int t = 0; t < dI.n; t++) if (dI[t] == dJ[t]) cslpTestDiagA[dI[t]] = dC[t];
+}
+
+func complex[int] matvec(complex[int] & v) {
+  complex[int] y = Aloc * v;
+  return y;
+}
+func complex[int] cslpOnly(complex[int] & r) {
+  complex[int] z = cslpHxP^-1 * r;
+  return z;
+}
+func complex[int] hxAuxCorrection(complex[int] & r) {
+  complex[int] rNode = cslpHxGLoc' * r;
+  complex[int] pNode = cslpHxMgrad^-1 * rNode;
+  complex[int] gradCorrection = cslpHxGLoc * pNode;
+
+  complex[int] z(r.n);
+  z = gradCorrection;
+
+  // Mirrors cslpHxPrecon's own cslpHxEnableVecTerm gate (default off -- see
+  // cslp_hx_precon.idp's 2026-07-29 note: enabling this reproduces the same
+  // GMRES-stagnation bug found in hx_precon.idp).
+  if (cslpHxEnableVecTerm == 1) {
+    complex[int] rVec = cslpHxPi' * r;
+    for (int n = 0; n < cslpHxNNode; n++)
+      if (cslpHxBndNode[n] == 1)
+        for (int c = 0; c < 3; c++) rVec[3*n + c] = 0.0;
+    complex[int] uVec = cslpHxMvec^-1 * rVec;
+    complex[int] vecCorrection = cslpHxPi * uVec;
+    z += vecCorrection;
+  }
+  return z;
+}
+func complex[int] hxWithJacobi(complex[int] & r) {
+  complex[int] smoothed(r.n);
+  for (int i = 0; i < r.n; i++) smoothed[i] = r[i] / cslpTestDiagA[i];
+  complex[int] z = hxAuxCorrection(r);
+  z += smoothed;
+  return z;
+}
+
+func real srcProfile(real xx, real yy, real zz) {
+  real rx = (xx - 0.5) / 0.15, ry = (yy - 0.5) / 0.15, rz = (zz - 0.5) / 0.15;
+  return exp(-(rx*rx + ry*ry + rz*rz));
+}
+varf vRhs([Ex,Ey,Ez],[Vx,Vy,Vz]) = int3d(Th)(srcProfile(x,y,z)*Vx) + on(1,2,3,4,5,6, Ex=0,Ey=0,Ez=0);
+complex[int] bGen(Eh.ndof);
+bGen = vRhs(0, Eh);
+
+int gmresN = Eh.ndof;
+real gmresRtol = 1e-8;
+int gmresMaxIt = 100;
+int gmresRestart = 30;
+
+cout << "=== CSLP alone ===" << endl;
+{
+  complex[int] gmresB(Eh.ndof);
+  gmresB = bGen;
+  complex[int] gmresX(Eh.ndof);
+  gmresX = 0.0;
+  int gmresIterCount = 0;
+  real gmresRelRes = 1.0;
+  int gmresConverged = 0;
+  func complex[int] precon(complex[int] & v) { return cslpOnly(v); }
+  include "gmres_precon.idp"
+  cout << "CSLP: iters=" << gmresIterCount << " relRes=" << gmresRelRes << " converged=" << gmresConverged << endl;
+}
+
+cout << "=== HX alone ===" << endl;
+{
+  complex[int] gmresB(Eh.ndof);
+  gmresB = bGen;
+  complex[int] gmresX(Eh.ndof);
+  gmresX = 0.0;
+  int gmresIterCount = 0;
+  real gmresRelRes = 1.0;
+  int gmresConverged = 0;
+  func complex[int] precon(complex[int] & v) { return hxWithJacobi(v); }
+  include "gmres_precon.idp"
+  cout << "HX: iters=" << gmresIterCount << " relRes=" << gmresRelRes << " converged=" << gmresConverged << endl;
+}
+
+cout << "=== CSLP+HX combined ===" << endl;
+{
+  complex[int] gmresB(Eh.ndof);
+  gmresB = bGen;
+  complex[int] gmresX(Eh.ndof);
+  gmresX = 0.0;
+  int gmresIterCount = 0;
+  real gmresRelRes = 1.0;
+  int gmresConverged = 0;
+  func complex[int] precon(complex[int] & v) { return cslpHxPrecon(v); }
+  include "gmres_precon.idp"
+  cout << "CSLP+HX: iters=" << gmresIterCount << " relRes=" << gmresRelRes << " converged=" << gmresConverged << endl;
+}

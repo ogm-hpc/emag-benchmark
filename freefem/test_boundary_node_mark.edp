@@ -1,0 +1,20 @@
+load "msh3"
+load "gmsh"
+mesh3 Th = gmshload3("generated_meshes/mesh/case3A_low_contrast.msh");
+fespace Ph(Th, P1);
+Ph marker = 0;
+
+cout << "Th.nbe = " << Th.nbe << endl;
+cout << "Th.nv = " << Th.nv << endl;
+
+int nMarked = 0;
+for (int k = 0; k < Th.nbe; k++) {
+  int lab = Th.be(k).label;
+  if (lab == 1) { // PEC label in case3A is typically 1 -- just testing syntax, not exact label
+    for (int v = 0; v < 3; v++) {
+      int nid = Th.be(k)[v];
+      if (marker[][nid] == 0) { marker[][nid] = 1; nMarked += 1; }
+    }
+  }
+}
+cout << "nMarked (label==1) = " << nMarked << endl;

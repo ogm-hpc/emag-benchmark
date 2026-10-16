@@ -1,0 +1,70 @@
+// Solution save / error check against a reference solution (off by default).
+// Shared by maxwell_edge03d_solver.edp and pcb/maxwell_pcb_solver.edp; included
+// after the timed phases ("PHASE total"). Requires (caller): mesh3 Th, fespace
+// Eh(Th, Edge03d), Eh<complex> [Esolx, Esoly, Esolz] (the solution), Ph0<complex>
+// epsC (material permittivity), real k0, and from runtime_case_config.idp:
+//   string solSaveFile   ""  or a path: write Esolx[] (FreeFEM DOF order)
+//   string solRefFile    ""  or a path: reference solution (same mesh and space,
+//                            e.g. the MUMPS solution saved by solSaveFile)
+// File format (text): first line ndof, then "re im" per DOF, 17 digits.
+//
+// Error e = E - E_ref, relative to the reference (norms with conjugation; the
+// system matrix itself stays complex symmetric):
+//   l2     ||e||_L2 / ||E_ref||_L2
+//   l2eps  the same with the weight Re(eps_r) (material permittivity, P0)
+//   curl   ||curl e||_L2 / ||curl E_ref||_L2
+//   hcurl  (k0^2 ||e||^2 + ||curl e||^2)^(1/2) / (same for E_ref)
+//          (k0 makes both terms the same unit, 1/length^2 x field^2)
+//   vec    ||e||_2 / ||E_ref||_2 of the DOF vectors
+// Integrals over the whole mesh (UPML layers included, without the stretching).
+// Output lines (parsed by run_benchmark.py):
+//   SOLUTION_SAVED ndof <n>
+//   SOLUTION_ERROR ndof <n> l2 <..> l2eps <..> curl <..> hcurl <..> vec <..> refL2 <..> refCurl <..>
+//   SOLUTION_CHECK_FAILED <reason>
+if (solSaveFile != "" || solRefFile != "") {
+  cout << "PHASE solution_check_start " << (clock() - tStart) << endl;
+  if (solSaveFile != "") {
+    ofstream fo(solSaveFile);
+    fo.precision(17);
+    fo << Esolx[].n << "\n";
+    for (int i = 0; i < Esolx[].n; i++) fo << real(Esolx[][i]) << " " << imag(Esolx[][i]) << "\n";
+    cout << "SOLUTION_SAVED ndof " << Esolx[].n << endl;
+  }
+  if (solRefFile != "") {
+    ifstream fi(solRefFile);
+    int nRef;
+    fi >> nRef;
+    if (nRef != Eh.ndof) {
+      cout << "SOLUTION_CHECK_FAILED ndof " << Eh.ndof << " reference " << nRef << endl;
+    } else {
+      Eh<complex> [Erefx, Erefy, Erefz];
+      for (int i = 0; i < nRef; i++) {
+        real vr, vi;
+        fi >> vr >> vi;
+        Erefx[][i] = vr + 1i * vi;
+      }
+      Eh<complex> [Edx, Edy, Edz];
+      Edx[] = Esolx[];
+      Edx[] -= Erefx[];
+      Ph0 epsW = real(epsC);
+      macro solChkSq(ux, uy, uz) (square(abs(ux)) + square(abs(uy)) + square(abs(uz))) //
+      macro solChkCurlSq(ux, uy, uz) (square(abs(dy(uz) - dz(uy))) + square(abs(dz(ux) - dx(uz)))
+                                      + square(abs(dx(uy) - dy(ux)))) //
+      real refL2 = int3d(Th)(solChkSq(Erefx, Erefy, Erefz));
+      real errL2 = int3d(Th)(solChkSq(Edx, Edy, Edz));
+      real refL2e = int3d(Th)(epsW * solChkSq(Erefx, Erefy, Erefz));
+      real errL2e = int3d(Th)(epsW * solChkSq(Edx, Edy, Edz));
+      real refCurl = int3d(Th)(solChkCurlSq(Erefx, Erefy, Erefz));
+      real errCurl = int3d(Th)(solChkCurlSq(Edx, Edy, Edz));
+      real k02 = k0 * k0;
+      cout << "SOLUTION_ERROR ndof " << nRef
+           << " l2 " << sqrt(errL2 / refL2)
+           << " l2eps " << sqrt(errL2e / refL2e)
+           << " curl " << sqrt(errCurl / refCurl)
+           << " hcurl " << sqrt((k02 * errL2 + errCurl) / (k02 * refL2 + refCurl))
+           << " vec " << Edx[].l2 / Erefx[].l2
+           << " refL2 " << sqrt(refL2) << " refCurl " << sqrt(refCurl) << endl;
+    }
+  }
+  cout << "PHASE solution_check_end " << (clock() - tStart) << endl;
+}

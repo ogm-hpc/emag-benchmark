@@ -1,0 +1,25 @@
+// Multiple right-hand sides with the hand-rolled outer methods (pcb_mrhs.idp):
+// dispatch to the sequential solves (shared, gcro) or block FGMRES.
+{
+  if ((mrhsMethod == "block" || mrhsMethod == "gcro") && krylovMethod != "gmres") {
+    cout << "ERROR: mrhsMethod " << mrhsMethod << " needs GMRES" << endl;
+    exit(1);
+  }
+  cout << "PHASE setup_done " << (clock() - tStart) << endl;
+  real tSolve0 = clock();
+  cout << 0 << " KSP Residual norm " << 1.0 << endl;
+  if (mrhsMethod == "block") {
+    include "pcb_mrhs_block.idp"
+  } else if (mrhsMethod == "shared" || mrhsMethod == "gcro") {
+    include "pcb_mrhs_seq.idp"
+  } else {
+    cout << "ERROR: unknown mrhsMethod " << mrhsMethod << endl;
+    exit(1);
+  }
+  cout << "SOLVE_TIME = " << (clock() - tSolve0) << endl;
+  cout << "MRHS_MATVECS " << mrhsMv << endl;
+  if (mrhsAllConv)
+    cout << "Linear solve converged due to CONVERGED_RTOL iterations " << mrhsMv << endl;
+  else
+    cout << "Linear solve did not converge due to DIVERGED_ITS iterations " << mrhsMv << endl;
+}

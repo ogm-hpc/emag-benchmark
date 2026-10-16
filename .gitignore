@@ -1,0 +1,14 @@
+# Meshes, released data and run results (large; meshes and data are on Zenodo)
+generated_meshes/
+emag_benchmark_v1.0/
+results/
+*.msh
+*.mtx
+*.log
+
+# Written by run_freefem_batch.py for each run
+freefem/runtime_case_config.idp
+
+# Python caches
+__pycache__/
+*.pyc

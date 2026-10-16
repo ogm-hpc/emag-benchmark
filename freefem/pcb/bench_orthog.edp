@@ -1,0 +1,110 @@
+// GMRES orthogonalization cost (docs/paper_plan.md task A6).
+//
+// Times one restart cycle of the Arnoldi orthogonalization of the hand-rolled
+// GMRES(m) (../gmres_precon.idp: modified Gram-Schmidt on arrays of vectors) on
+// random complex vectors of length n, and two alternatives:
+//   cgs2v  classical Gram-Schmidt twice, vectors stored as arrays (dots first,
+//          then the update), the same storage as gmres_precon.idp
+//   cgs2d  classical Gram-Schmidt twice with the basis in a dense n x (m+1)
+//          array, dots and update as dense matrix-vector products
+// Output: "ORTHOG <method> n=<n> m=<m> s_per_it=<seconds per Arnoldi step>
+// loss=<max |V^H V - I|>", averaged over the m steps of one cycle.
+// Compare s_per_it with the time per iteration of the solver records
+// (freefem/pcb/convergence_trend.py backtest, last table) for the same n.
+//
+//   FreeFem++-mpi -nw -v 0 bench_orthog.edp -n 300000 -m 300
+
+include "getARGV.idp"
+int n = getARGV("-n", 100000);
+int m = getARGV("-m", 300);
+randinit(1234);
+
+func real orthoLoss(complex[int][int] & V, int k) {
+  real loss = 0;
+  for (int i = 0; i < k; i++)
+    for (int j = 0; j < k; j++) {
+      complex d = V[i]' * V[j];
+      if (i == j) d -= 1.0;
+      loss = max(loss, abs(d));
+    }
+  return loss;
+}
+
+// random start vectors (the same for every method)
+complex[int][int] W(m);
+for (int j = 0; j < m; j++) {
+  W[j].resize(n);
+  for (int i = 0; i < n; i++) W[j][i] = randreal1() - 0.5 + 1i * (randreal1() - 0.5);
+}
+complex[int] v0(n);
+for (int i = 0; i < n; i++) v0[i] = randreal1() - 0.5 + 1i * (randreal1() - 0.5);
+v0 /= v0.l2;
+
+// --- MGS, arrays of vectors (gmres_precon.idp) ---
+{
+  complex[int][int] V(m + 1);
+  for (int j = 0; j <= m; j++) V[j].resize(n);
+  V[0] = v0;
+  real t0 = clock();
+  for (int j = 0; j < m; j++) {
+    complex[int] w = W[j];
+    for (int i = 0; i <= j; i++) {
+      complex hij = V[i]' * w;
+      w -= hij * V[i];
+    }
+    real h = w.l2;
+    V[j + 1] = w;
+    V[j + 1] /= h;
+  }
+  real t = clock() - t0;
+  cout << "ORTHOG mgs n=" << n << " m=" << m << " s_per_it=" << t / m
+       << " loss=" << orthoLoss(V, min(m + 1, 40)) << endl;
+}
+
+// --- CGS2, arrays of vectors ---
+{
+  complex[int][int] V(m + 1);
+  for (int j = 0; j <= m; j++) V[j].resize(n);
+  V[0] = v0;
+  real t0 = clock();
+  for (int j = 0; j < m; j++) {
+    complex[int] w = W[j];
+    for (int pass = 0; pass < 2; pass++) {
+      complex[int] h(j + 1);
+      for (int i = 0; i <= j; i++) h[i] = V[i]' * w;
+      for (int i = 0; i <= j; i++) w -= h[i] * V[i];
+    }
+    real hh = w.l2;
+    V[j + 1] = w;
+    V[j + 1] /= hh;
+  }
+  real t = clock() - t0;
+  cout << "ORTHOG cgs2v n=" << n << " m=" << m << " s_per_it=" << t / m
+       << " loss=" << orthoLoss(V, min(m + 1, 40)) << endl;
+}
+
+// --- CGS2, dense basis (matrix-vector products) ---
+{
+  complex[int, int] Vd(n, m + 1);
+  Vd = 0;
+  Vd(:, 0) = v0;
+  real t0 = clock();
+  for (int j = 0; j < m; j++) {
+    complex[int] w = W[j];
+    for (int pass = 0; pass < 2; pass++) {
+      complex[int] h(m + 1);
+      h = Vd' * w;          // conj-transpose times vector over all m+1 columns
+      for (int i = j + 1; i <= m; i++) h[i] = 0;
+      complex[int] c = Vd * h;
+      w -= c;
+    }
+    real hh = w.l2;
+    w /= hh;
+    Vd(:, j + 1) = w;
+  }
+  real t = clock() - t0;
+  complex[int][int] V(min(m + 1, 40));
+  for (int j = 0; j < V.n; j++) { V[j].resize(n); V[j] = Vd(:, j); }
+  cout << "ORTHOG cgs2d n=" << n << " m=" << m << " s_per_it=" << t / m
+       << " loss=" << orthoLoss(V, V.n) << endl;
+}

@@ -1,0 +1,198 @@
+// Node-patch preconditioner toy check (pcb_npatch_precon.idp).
+//
+// Unit cube, PEC (on()) on all faces, A = K - k0^2 (1 - i tand) M. One node-patch
+// variant per run (-np 0 asm, 1 ras, 2 sms; pcb_npatch_precon.idp). Checks:
+//   CHECK_PATCH  (asm) npatchPrecon against a direct patch-by-patch application
+//                (catches the COO assembly, e.g. the summing of duplicates)
+//   CHECK_SYM    |u^T M v - v^T M u| / (|u||M v|)  (COCG needs ~1e-16; ras is not symmetric)
+// Then outer solves, rtol 1e-8, maxit -maxit, GMRES(30) (../gmres_precon.idp) and
+// COCG (../cocg_precon.idp, symmetric preconditioners only), for the node patch
+// and, with -base 1, the baselines jacobi, sgs (PETSc SOR symmetric) and hx
+// (2-term, exact Mgrad, Dirichlet mask as pcb_hx_precon.idp).
+// RHS A: a discrete gradient (b = A grad p); RHS B: a Gaussian source.
+// Output lines "RESULT <rhs> <prec> <krylov> it=<n> relres=<r> true=<t> conv=<0|1> time=<s>".
+//
+// Run (from freefem/pcb):
+//   FreeFem++-mpi -nw -v 0 test_npatch_toy.edp [-np 0] [-base 1] [-n 6] [-k 6.283185] [-tand 0] [-maxit 500]
+
+load "msh3"
+load "PETSc-complex"
+load "Element_Mixte3d"
+load "mat_edgeP1"
+macro dimension()3// EOM
+include "macro_ddm.idp"
+include "getARGV.idp"
+
+int nCube = getARGV("-n", 6);
+real k0 = getARGV("-k", 2.0 * pi);
+real tand = getARGV("-tand", 0.0);
+int maxIt = getARGV("-maxit", 500);
+int npatchType = getARGV("-np", 0);
+int withBase = getARGV("-base", 0);
+
+mesh3 Th = cube(nCube, nCube, nCube);
+func Pk = Edge03d;
+fespace Eh(Th, Pk);
+fespace Ph(Th, P1);
+complex epsC = 1.0 - 1i * tand;
+
+macro dot3(a1,a2,a3,b1,b2,b3) ((a1)*(b1) + (a2)*(b2) + (a3)*(b3)) //
+macro curlDot(Ex,Ey,Ez,Vx,Vy,Vz) dot3(dy(Ez) - dz(Ey), dz(Ex) - dx(Ez), dx(Ey) - dy(Ex),
+                                      dy(Vz) - dz(Vy), dz(Vx) - dx(Vz), dx(Vy) - dy(Vx)) //
+
+int[int] n2o;
+macro ThN2O()n2o// EOM
+DmeshCreate(Th);
+
+varf aMaxwell([Ex, Ey, Ez], [Vx, Vy, Vz]) =
+    int3d(Th)( curlDot(Ex, Ey, Ez, Vx, Vy, Vz) - (k0 * k0) * epsC * dot3(Ex, Ey, Ez, Vx, Vy, Vz) )
+  + on(1, 2, 3, 4, 5, 6, Ex = 0, Ey = 0, Ez = 0);
+matrix<complex> Aloc = aMaxwell(Eh, Eh);
+int nE = Eh.ndof;
+cout << "TOY n=" << nCube << " k0=" << k0 << " tand=" << tand << " edges=" << nE << " nodes=" << Ph.ndof << endl;
+
+// --- baselines: jacobi / sgs / hx ----------------------------------------------
+complex[int] diagInv = Aloc.diag;
+for (int i = 0; i < nE; i++) diagInv[i] = (abs(diagInv[i]) < 1e-12) ? 1e12 : 1.0 / diagInv[i];
+Mat<complex> Asgs;
+{
+  macro ThPkPart()Edge03ds0// EOM
+  MatCreate(Th, Asgs, Pk);
+}
+Asgs = Aloc;
+set(Asgs, sparams = "-ksp_type preonly -pc_type sor -pc_sor_symmetric");
+complex[int] maskC(nE);
+{
+  complex[int] d = Aloc.diag;
+  for (int i = 0; i < nE; i++) maskC[i] = (abs(d[i]) > 1e20) ? 0.0 : 1.0;
+}
+matrix G;
+MatrixEdgeP1(G, Th);
+varf vMgrad(p, q) = int3d(Th)( -(k0 * k0) * epsC * (dx(p) * dx(q) + dy(p) * dy(q) + dz(p) * dz(q)) )
+                  + on(1, 2, 3, 4, 5, 6, p = 0);
+matrix<complex> Mgrad = vMgrad(Ph, Ph);
+set(Mgrad, solver = sparsesolver);
+
+// --- node patch -----------------------------------------------------------------
+include "pcb_npatch_precon.idp"
+string[int] npName = ["npatch_asm", "npatch_ras", "npatch_sms"];
+
+if (npatchType == 0) {
+  // CHECK_PATCH: z = sum_v R_v^T A_v^-1 R_v r + Jacobi on the penalty edges
+  complex[int] r(nE), z1(nE), z2(nE);
+  for (int i = 0; i < nE; i++) r[i] = randreal1() + 1i * randreal1();
+  z1 = npatchPrecon(r);
+  z2 = npPenInv .* r;
+  for (int n = 0; n < npNN; n++) {
+    int d = npDeg[n], o = npBOff[n];
+    for (int p = 0; p < d; p++) {
+      complex s = 0;
+      for (int q = 0; q < d; q++) s += npBlk[o + p * d + q] * r[npEdge[npOff[n] + q]];
+      z2[npEdge[npOff[n] + p]] += s;
+    }
+  }
+  z2 -= z1;
+  cout << "CHECK_PATCH |M r - direct| / |direct| = " << z2.l2 / z1.l2 << endl;
+}
+{
+  complex[int] u(nE), v(nE);
+  for (int i = 0; i < nE; i++) { u[i] = randreal1() + 1i * randreal1(); v[i] = randreal1() - 1i * randreal1(); }
+  complex[int] mu = npatchPrecon(u), mv = npatchPrecon(v);
+  complex[int] t1 = u .* mv, t2 = v .* mu;
+  cout << "CHECK_SYM " << npName[npatchType] << " " << abs(t1.sum - t2.sum) / (u.l2 * mv.l2) << endl;
+}
+
+// --- outer solves -----------------------------------------------------------------
+int precType = 3;   // 0 jacobi, 1 sgs, 2 hx, 3 node patch
+string[int] precName = ["jacobi", "sgs", "hx", npName[npatchType]];
+
+func complex[int] matvec(complex[int] & v) {
+  complex[int] y = Aloc * v;
+  return y;
+}
+func complex[int] precon(complex[int] & r) {
+  complex[int] z(r.n);
+  if (precType == 0) z = diagInv .* r;
+  else if (precType == 1) z = Asgs^-1 * r;
+  else if (precType == 2) {
+    z = diagInv .* r;
+    complex[int] rm = maskC .* r;
+    complex[int] rn = G' * rm;
+    complex[int] pn = Mgrad^-1 * rn;
+    complex[int] gc = G * pn;
+    gc = maskC .* gc;
+    z += gc;
+  }
+  else z = npatchPrecon(r);
+  return z;
+}
+
+Ph pTrue = sin(pi * x) * sin(pi * y) * sin(pi * z);
+real[int] eGradR = G * pTrue[];
+complex[int] eGrad(nE);
+// zeroed on the PEC edges: sin(pi x) ~ 1e-16 there, times the penalty 1e30 would dominate b
+for (int i = 0; i < nE; i++) eGrad[i] = maskC[i] * eGradR[i];
+cout << "RHS_A |grad p| = " << eGrad.l2 << endl;
+complex[int] bA = Aloc * eGrad;
+func real src(real xx, real yy, real zz) {
+  real rx = (xx - 0.5) / 0.15, ry = (yy - 0.5) / 0.15, rz = (zz - 0.5) / 0.15;
+  return exp(-(rx * rx + ry * ry + rz * rz));
+}
+varf vRhs([Ex, Ey, Ez], [Vx, Vy, Vz]) = int3d(Th)(src(x, y, z) * Vx) + on(1, 2, 3, 4, 5, 6, Ex = 0, Ey = 0, Ez = 0);
+complex[int] bB = vRhs(0, Eh);
+
+int p0 = withBase ? 0 : 3;
+for (int p = p0; p < 4; p++) {
+  precType = p;
+  real t0 = clock();
+  for (int k = 0; k < 10; k++) { complex[int] z = precon(bB); }
+  cout << "APPLY " << precName[p] << " " << (clock() - t0) / 10 << " s" << endl;
+}
+
+int[int] cocgOk = [1, 1, 0, (npatchType == 1) ? 0 : 1];   // symmetric preconditioners
+for (int rhs = 0; rhs < 2; rhs++) {
+  for (int p = p0; p < 4; p++) {
+    precType = p;
+    for (int kr = 0; kr < 2; kr++) {
+      if (kr == 1 && !cocgOk[p]) continue;
+      complex[int] bb(nE);
+      if (rhs == 0) bb = bA; else bb = bB;
+      complex[int] xs(nE);
+      int it = 0, conv = 0;
+      real rel = 1, t0 = clock();
+      if (kr == 0) {
+        int gmresN = nE;
+        complex[int] gmresB(nE);
+        gmresB = bb;
+        complex[int] gmresX(nE);
+        gmresX = 0.0;
+        real gmresRtol = 1e-8;
+        int gmresMaxIt = maxIt;
+        int gmresRestart = 30;
+        int gmresIterCount = 0;
+        real gmresRelRes = 1.0;
+        int gmresConverged = 0;
+        include "../gmres_precon.idp"
+        xs = gmresX; it = gmresIterCount; rel = gmresRelRes; conv = gmresConverged;
+      } else {
+        int cocgN = nE;
+        complex[int] cocgB(nE);
+        cocgB = bb;
+        complex[int] cocgX(nE);
+        cocgX = 0.0;
+        real cocgRtol = 1e-8;
+        int cocgMaxIt = maxIt;
+        int cocgIterCount = 0;
+        real cocgRelRes = 1.0;
+        int cocgConverged = 0;
+        include "../cocg_precon.idp"
+        xs = cocgX; it = cocgIterCount; rel = cocgRelRes; conv = cocgConverged;
+      }
+      complex[int] rr = Aloc * xs;
+      rr -= bb;
+      cout << "RESULT " << (rhs == 0 ? "A" : "B") << " " << precName[p] << " " << (kr == 0 ? "gmres" : "cocg")
+           << " it=" << it << " relres=" << rel << " true=" << (rr.l2 / bb.l2) << " conv=" << conv
+           << " time=" << (clock() - t0) << endl;
+    }
+  }
+}

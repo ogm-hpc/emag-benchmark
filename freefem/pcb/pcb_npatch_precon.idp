@@ -1,0 +1,310 @@
+// Node-patch preconditioner (Murayama, Muto, Takei, IEICE Trans. Electron.
+// E101-C(8), 612-619, 2018: "node block" / node patch; the extended patch of
+// that paper, stretched along x / y on structured tetrahedral meshes, is not
+// implemented).
+//
+// Patch V_v = the edges incident to node v (each edge is in exactly 2 patches).
+// grad(lambda_v) of the Whitney element is spanned by exactly these edges, so
+// each local problem A_v = R_v A R_v^T contains the local gradient (kernel)
+// direction, where A = -k0^2 (eps grad lambda_v, grad lambda_v) != 0: the small
+// blocks are invertible on the indefinite operator (cf. the vertex-patch
+// smoother of Arnold-Falk-Winther).
+//
+// npatchType:
+//   0  ASM  additive Schwarz   M = sum_v R_v^T A_v^-1 R_v        (complex symmetric: COCG ok)
+//   1  RAS  restricted additive, prolongation to owned edges only (owner = tail node; GMRES only)
+//   2  SMS  symmetric multiplicative Schwarz over a greedy node colouring: patches of one
+//           colour do not share edges, so a colour is an exact additive step; colours are
+//           swept forward then backward (complex symmetric: COCG ok). Close to the
+//           multiplicative scheme of the paper, with the colouring fixing the order.
+// The on() penalty edges (|diag| > 1e20, PEC) are left out of the patches and get
+// 1/diag (Jacobi) instead.
+//
+// ASM / RAS are one sparse matrix (assembled once), applied as one mat-vec.
+// SMS stores per colour c the block-diagonal M_c and Q_c = A M_c, and applies
+//   z = 0, s = r;  for c = 0..C-1, C-1..0:  z += M_c s;  s -= Q_c s
+// (2 C steps of 2 sparse mat-vecs each).
+//
+// Setup without loops over the nonzeros (2026-10-05; the loop version took 33 s
+// on P03-1): "slots" (v, p) = edge p of patch v, numbered patch by patch
+// (npOff). The blocks are gathered from A's COO by array operations (gather /
+// scatter; integer equality as 1 ./ (1 + d.*d)), each block entry written
+// once. The inverses are put back as the block-diagonal slot matrix D^-1, whose
+// pattern is P P^T (P: slot -> node incidence; FreeFEM's COO is row-major, i.e.
+// the block order of npBlk), and M = R^T D^-1 R (R: slot -> edge) by sparse
+// products.
+//
+// Include-style block. Caller-defined globals: mesh3 Th, matrix<complex> Aloc
+// (edge numbering of MatrixEdgeP1), int npatchType.
+// On return: func complex[int] npatchPrecon(complex[int] & r); npatchNColors (SMS).
+
+load "mat_edgeP1"
+load "lapack"
+
+real npT0 = clock();
+int npN = Aloc.n;
+int npNN;
+int[int] npTail(npN), npHead(npN);
+{
+  matrix npG;
+  MatrixEdgeP1(npG, Th);
+  if (npG.n != npN) { cout << "ERROR: npatch: MatrixEdgeP1 rows " << npG.n << " != ndof " << npN << endl; exit(1); }
+  npNN = npG.m;
+  int[int] I, J; real[int] C;
+  [I, J, C] = npG;
+  for (int t = 0; t < I.n; t++) {
+    if (I[t] >= npN || J[t] >= npNN) continue;   // MatrixEdgeP1 padding entry
+    if (C[t] < 0) npTail[I[t]] = J[t]; else npHead[I[t]] = J[t];
+  }
+}
+
+real npT1 = clock();
+// free (non-penalty) edges; Jacobi on the penalty edges
+int[int] npFree(npN);
+complex[int] npPenInv(npN);
+npPenInv = 0.0;
+int npNPen = 0;
+{
+  complex[int] d = Aloc.diag;
+  for (int i = 0; i < npN; i++) {
+    npFree[i] = (abs(d[i]) > 1.0e20) ? 0 : 1;
+    if (!npFree[i]) { npPenInv[i] = 1.0 / d[i]; npNPen++; }
+  }
+}
+
+// patches: slots (CSR npOff / npEdge), the slot position of each edge in its
+// tail / head patch, the node of each slot and its ownership (tail slot, RAS)
+int[int] npDeg(npNN);
+npDeg = 0;
+for (int e = 0; e < npN; e++)
+  if (npFree[e]) { npDeg[npTail[e]]++; npDeg[npHead[e]]++; }
+int[int] npOff(npNN + 1), npBOff(npNN + 1);
+npOff[0] = 0; npBOff[0] = 0;
+int npMaxDeg = 0;
+for (int n = 0; n < npNN; n++) {
+  npOff[n + 1] = npOff[n] + npDeg[n];
+  npBOff[n + 1] = npBOff[n] + npDeg[n] * npDeg[n];
+  npMaxDeg = max(npMaxDeg, npDeg[n]);
+}
+int npNs = npOff[npNN], npNb = npBOff[npNN];
+int[int] npEdge(npNs), npSlotNode(npNs), npSlotOwn(npNs), npPosT(npN), npPosH(npN);
+npPosT = 0; npPosH = 0; npSlotOwn = 0;
+{
+  int[int] fill(npNN);
+  fill = 0;
+  for (int e = 0; e < npN; e++) {
+    if (!npFree[e]) continue;
+    int a = npTail[e], b = npHead[e];
+    int sa = npOff[a] + fill[a], sb = npOff[b] + fill[b];
+    npPosT[e] = fill[a]; npEdge[sa] = e; npSlotNode[sa] = a; npSlotOwn[sa] = 1; fill[a]++;
+    npPosH[e] = fill[b]; npEdge[sb] = e; npSlotNode[sb] = b; fill[b]++;
+  }
+}
+
+real npT2 = clock();
+// local blocks A_v (row-major, block v at npBOff[v]) from A's COO: entry (i, j)
+// belongs to the patches of the endpoints shared by edges i and j (both when
+// i = j). One pass per side (patch of the tail / head of i); entries of no
+// patch go to the dump slot npNb.
+complex[int] npBlk(npNb + 1);
+npBlk = 0.0;
+{
+  int[int] I, J; complex[int] C;
+  [I, J, C] = Aloc;
+  int nz = I.n;
+  int[int] one(nz);
+  one = 1;
+  int[int] f = npFree(I);
+  {
+    int[int] fj = npFree(J);
+    f = f .* fj;
+  }
+  int[int] tj = npTail(J), hj = npHead(J), ptj = npPosT(J), phj = npPosH(J);
+  for (int side = 0; side < 2; side++) {
+    int[int] ni(nz), pi(nz);
+    if (side == 0) { ni = npTail(I); pi = npPosT(I); }
+    else { ni = npHead(I); pi = npPosH(I); }
+    // e1 = (ni == tj), e2 = (ni == hj)
+    int[int] e1 = ni - tj, e2 = ni - hj;
+    e1 = e1 .* e1; e1 += one; e1 = one ./ e1;
+    e2 = e2 .* e2; e2 += one; e2 = one ./ e2;
+    int[int] v = e1 + e2;
+    v = v .* f;
+    // position npBOff[ni] + pi * npDeg[ni] + pj, pj = slot position of j in patch ni
+    int[int] pos = npBOff(ni), w = npDeg(ni);
+    w = w .* pi;
+    pos += w;
+    w = e1 .* ptj; pos += w;
+    w = e2 .* phj; pos += w;
+    pos = pos .* v;
+    w = one - v;
+    w = w * npNb;
+    pos += w;
+    npBlk(pos) = C;
+  }
+}
+npBlk[npNb] = 0.0;
+
+real npT3 = clock();
+// A_v^-1 in place (LAPACK)
+for (int n = 0; n < npNN; n++) {
+  int d = npDeg[n];
+  if (d == 0) continue;
+  complex[int,int] B(d, d);
+  int o = npBOff[n];
+  for (int p = 0; p < d; p++)
+    for (int q = 0; q < d; q++) B(p, q) = npBlk[o + p * d + q];
+  inv(B);
+  for (int p = 0; p < d; p++)
+    for (int q = 0; q < d; q++) npBlk[o + p * d + q] = B(p, q);
+}
+
+real npT4 = clock();
+// greedy node colouring (SMS): two patches overlap iff their nodes share a free edge
+int[int] npColor(npNN);
+npColor = 0;
+int npNColors = 1;
+if (npatchType == 2) {
+  npColor = -1;
+  int[int] used(npMaxDeg + 2);
+  used = -1;
+  for (int n = 0; n < npNN; n++) {
+    if (npDeg[n] == 0) { npColor[n] = 0; continue; }
+    for (int k = npOff[n]; k < npOff[n + 1]; k++) {
+      int e = npEdge[k];
+      int m = (npTail[e] == n) ? npHead[e] : npTail[e];
+      if (npColor[m] >= 0) used[npColor[m]] = n;
+    }
+    int c = 0;
+    while (used[c] == n) c++;
+    npColor[n] = c;
+    npNColors = max(npNColors, c + 1);
+  }
+}
+
+real npT5 = clock();
+// slot matrices (a last zero entry fixes the sizes; it must keep the COO
+// row-major sorted: an out-of-order entry makes FreeFEM's [I, J, C] constructor
+// take ~24 s for 2e5 entries): R (slot -> edge, Ns x n),
+// D^-1 (block diagonal, Ns x Ns, pattern of P P^T), the penalty-edge Jacobi
+// diagonal Dp (n x n). Subsets of slots (RAS: the owned ones; SMS: one colour)
+// are taken by selection matrices E (rows = the chosen slots, no stored zeros:
+// FreeFEM's products keep explicit zeros, so masking by a 0/1 diagonal would
+// carry the full pattern into every M_c).
+int[int] npSeq(npNs + 1), npSeqS(npNs);
+for (int k = 0; k < npNs; k++) { npSeq[k] = k; npSeqS[k] = k; }
+npSeq[npNs] = npNs - 1;
+matrix<complex> npR, npDinv, npDp;
+// selection of the slots npSel(a:b-1), (b - a) x Ns
+macro npSelect(OUT, SEL, A, B)
+{
+  int len = (B) - (A);
+  int[int] rows(len + 1), cols(len + 1);
+  complex[int] vals(len + 1);
+  rows(0:len - 1) = npSeqS(0:len - 1);
+  cols(0:len - 1) = SEL((A):(B) - 1);
+  vals = 1.0;
+  rows[len] = len - 1; cols[len] = npNs - 1; vals[len] = 0.0;
+  OUT = [rows, cols, vals];
+}// EOM
+{
+  int[int] cols(npNs + 1);
+  cols(0:npNs - 1) = npEdge;
+  cols[npNs] = npN - 1;
+  complex[int] vals(npNs + 1);
+  vals = 1.0;
+  vals[npNs] = 0.0;
+  npR = [npSeq, cols, vals];
+  complex[int] onesS(npNs);
+  onesS = 1.0;
+  matrix<complex> P = [npSeqS, npSlotNode, onesS];   // no size entry: P P^T is Ns x Ns anyway
+  matrix<complex> PP = P * P';
+  int[int] bI, bJ; complex[int] bV;
+  [bI, bJ, bV] = PP;
+  if (bI.n != npNb) { cout << "ERROR: npatch: P P^T has " << bI.n << " entries, blocks " << npNb << endl; exit(1); }
+  bV = npBlk(0:npNb - 1);
+  npDinv = [bI, bJ, bV];
+  int[int] dg(npN);
+  for (int i = 0; i < npN; i++) dg[i] = i;
+  npDp = [dg, dg, npPenInv];
+}
+
+real npT6 = clock();
+// ASM: M = R^T D^-1 R + Dp. RAS: M = (E R)^T (E D^-1) R + Dp, E the owned slots.
+// SMS: M_c = (E_c R)^T (E_c D^-1 E_c^T) (E_c R) (+ Dp for colour 0), E_c the slots
+// of colour c (whole patches), and Q_c = A M_c.
+matrix<complex> npM;
+matrix<complex>[int] npMc(npNColors), npQc(npNColors);
+if (npatchType == 2) {
+  // slots sorted by colour
+  int[int] cOff(npNColors + 1), sel(npNs);
+  cOff = 0;
+  for (int k = 0; k < npNs; k++) cOff[npColor[npSlotNode[k]] + 1]++;
+  for (int c = 0; c < npNColors; c++) cOff[c + 1] += cOff[c];
+  {
+    int[int] fill(npNColors);
+    for (int c = 0; c < npNColors; c++) fill[c] = cOff[c];
+    for (int k = 0; k < npNs; k++) { int c = npColor[npSlotNode[k]]; sel[fill[c]] = k; fill[c]++; }
+  }
+  for (int c = 0; c < npNColors; c++) {
+    matrix<complex> E;
+    npSelect(E, sel, cOff[c], cOff[c + 1])
+    matrix<complex> ER = E * npR;
+    matrix<complex> ED = E * npDinv;
+    matrix<complex> EDE = ED * E';
+    matrix<complex> T = EDE * ER;
+    npMc[c] = ER' * T;
+    if (c == 0) npMc[c] = npMc[c] + npDp;
+    npQc[c] = Aloc * npMc[c];
+  }
+} else if (npatchType == 1) {
+  int nOwn = 0;
+  for (int k = 0; k < npNs; k++) nOwn += npSlotOwn[k];
+  int[int] sel(nOwn);
+  {
+    int t = 0;
+    for (int k = 0; k < npNs; k++) if (npSlotOwn[k]) { sel[t] = k; t++; }
+  }
+  matrix<complex> E;
+  npSelect(E, sel, 0, nOwn)
+  matrix<complex> ER = E * npR;
+  matrix<complex> ED = E * npDinv;
+  matrix<complex> T = ED * npR;
+  npM = ER' * T;
+  npM = npM + npDp;
+} else {
+  matrix<complex> DR = npDinv * npR;
+  npM = npR' * DR;
+  npM = npM + npDp;
+}
+{
+  int tot = (npatchType == 2) ? 0 : npM.nnz;
+  int totQ = 0;
+  if (npatchType == 2) for (int c = 0; c < npNColors; c++) { tot += npMc[c].nnz; totQ += npQc[c].nnz; }
+  real npT7 = clock();
+  cout << "NPATCH_SETUP topology " << (npT1 - npT0) << " patches " << (npT2 - npT1) << " blocks " << (npT3 - npT2)
+       << " inverse " << (npT4 - npT3) << " colour " << (npT5 - npT4) << " slots " << (npT6 - npT5)
+       << " matrix " << (npT7 - npT6) << " s" << endl;
+  cout << "NPATCH type " << npatchType << " edges " << npN << " (penalty " << npNPen << ") nodes " << npNN
+       << " max patch " << npMaxDeg << " blocks nnz " << npNb << " colours " << npNColors
+       << " M nnz " << tot << " Q nnz " << totQ << " A nnz " << Aloc.nnz
+       << " setup " << (clock() - npT0) << " s" << endl;
+}
+
+func complex[int] npatchPrecon(complex[int] & r) {
+  complex[int] z(r.n);
+  if (npatchType != 2) {
+    z = npM * r;
+  } else {
+    z = 0.0;
+    complex[int] s(r.n), w(r.n);
+    s = r;
+    for (int k = 0; k < 2 * npNColors; k++) {
+      int c = (k < npNColors) ? k : 2 * npNColors - 1 - k;
+      w = npMc[c] * s;
+      z += w;
+      if (k < 2 * npNColors - 1) { w = npQc[c] * s; s -= w; }
+    }
+  }
+  return z;
+}

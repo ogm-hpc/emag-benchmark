@@ -1,0 +1,121 @@
+// Lumped-port excitation (E2) and port post-processing for maxwell_pcb_solver.edp
+// (pcb_problem_benchmark_settings.md 3.3). The port resistor term is in
+// pcb_common.idp (surfCoef); this file holds the Norton-current right-hand
+// side, the port voltages and the S-parameters. Requires (caller): Th, Eh,
+// pcb_common.idp (eta0), runtime_case_config.idp (k0, pecLabel*) and
+// pcb_case_config.idp (nPorts, portLabel/Zs/W/R/Ex/Ey/Ez 1..16, excitedPort,
+// portI, pcbDiag).
+//
+// Port p: rectangle S_p (width w_p, height h_p, unit height vector e_p from
+// ground to trace), resistor R_p in parallel with the current source I_p.
+//   RHS    l(v)  = -i*k0*eta0 * int_{S_p} (I_p/w_p) e_p.v ds
+//   voltage V_p  = -(1/w_p) int_{S_p} E.e_p ds
+//   S_ij         = 2*V_i/(I_j*R) - delta_ij        (equal reference R)
+// Lengths in mm, k0 in 1/mm, E in V/mm: V_p in V, I_p in A.
+
+// Port slots 1..16 as arrays (label -1 = unused slot).
+int[int] portLabels = [portLabel1, portLabel2, portLabel3, portLabel4, portLabel5, portLabel6,
+                       portLabel7, portLabel8, portLabel9, portLabel10, portLabel11, portLabel12,
+                       portLabel13, portLabel14, portLabel15, portLabel16];
+real[int] portWs = [portW1, portW2, portW3, portW4, portW5, portW6, portW7, portW8,
+                    portW9, portW10, portW11, portW12, portW13, portW14, portW15, portW16];
+real[int] portRs = [portR1, portR2, portR3, portR4, portR5, portR6, portR7, portR8,
+                    portR9, portR10, portR11, portR12, portR13, portR14, portR15, portR16];
+real[int] portExs = [portEx1, portEx2, portEx3, portEx4, portEx5, portEx6, portEx7, portEx8,
+                     portEx9, portEx10, portEx11, portEx12, portEx13, portEx14, portEx15, portEx16];
+real[int] portEys = [portEy1, portEy2, portEy3, portEy4, portEy5, portEy6, portEy7, portEy8,
+                     portEy9, portEy10, portEy11, portEy12, portEy13, portEy14, portEy15, portEy16];
+real[int] portEzs = [portEz1, portEz2, portEz3, portEz4, portEz5, portEz6, portEz7, portEz8,
+                     portEz9, portEz10, portEz11, portEz12, portEz13, portEz14, portEz15, portEz16];
+
+// Excited port (1-based excitedPort) as scalars for the varf.
+int excLabel = -1;
+real excW = 1.0, excEx = 0.0, excEy = 0.0, excEz = 0.0, excR = 1.0;
+if (excitedPort >= 1 && excitedPort <= portLabels.n) {
+  int ie = excitedPort - 1;
+  excLabel = portLabels[ie]; excW = portWs[ie]; excR = portRs[ie];
+  excEx = portExs[ie]; excEy = portEys[ie]; excEz = portEzs[ie];
+}
+
+varf lPort([Ex, Ey, Ez], [Vx, Vy, Vz]) =
+    int2d(Th, excLabel)( -1i * k0 * eta0 * (portI / excW) * (excEx * Vx + excEy * Vy + excEz * Vz) )
+  + on(pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+       pecLabel5, pecLabel6, pecLabel7, pecLabel8,
+       Ex = 0, Ey = 0, Ez = 0);
+
+// Port voltage of the solution (Esolx, Esoly, Esolz) on label lb.
+macro portVoltage(lb, w, ex, ey, ez) (-int2d(Th, lb)(Esolx * (ex) + Esoly * (ey) + Esolz * (ez)) / (w)) //
+
+// Post-processing: PORT_V / PORT_S lines (parsed by run_pcb_benchmark.py).
+// S is the column of the excited port, with its R as the common reference.
+// (No "//" comments inside a macro body: they end the macro.)
+macro portReport()
+  {
+    cout.precision(12);
+    for (int p = 0; p < nPorts; p++) {
+      complex vp = portVoltage(portLabels[p], portWs[p], portExs[p], portEys[p], portEzs[p]);
+      real area = int2d(Th, portLabels[p])(1.0);
+      cout << "PORT_V " << (p + 1) << " " << portLabels[p] << " " << real(vp) << " " << imag(vp)
+           << " area " << area << endl;
+      if (excitation == "E2" && excitedPort >= 1) {
+        complex s = 2.0 * vp / (portI * excR) - ((p + 1) == excitedPort ? 1.0 : 0.0);
+        cout << "PORT_S " << (p + 1) << " " << excitedPort << " " << real(s) << " " << imag(s)
+             << " abs " << abs(s) << " dB " << 20.0 * log10(max(abs(s), 1.0e-300))
+             << " deg " << arg(s) * 180.0 / pi << endl;
+      }
+    }
+  }
+// EOM
+
+// SIBC faces (sibcLabel1..4): RMS tangential field and the power absorbed by
+// the conductor, P = n_f * Re(Z_s)/(2|Z_s|^2) * int |E_t|^2 ds [W] (E in V/mm,
+// area in mm^2), from the surface current |J_s| = |E_t|/|Z_s| on each of the
+// n_f conductor surfaces.
+macro sibcReport()
+  {
+    int[int] sibcL = [sibcLabel1, sibcLabel2, sibcLabel3, sibcLabel4];
+    real[int] sibcF = [sibcFactor1, sibcFactor2, sibcFactor3, sibcFactor4];
+    real zs2 = square(sibcZsRe) + square(sibcZsIm);
+    for (int i = 0; i < sibcL.n; i++) {
+      if (sibcL[i] < 0) continue;
+      real ar = int2d(Th, sibcL[i])(1.0);
+      real et = int2d(Th, sibcL[i])(tangDot(real(Esolx), real(Esoly), real(Esolz), real(Esolx), real(Esoly), real(Esolz))
+                                  + tangDot(imag(Esolx), imag(Esoly), imag(Esolz), imag(Esolx), imag(Esoly), imag(Esolz)));
+      cout << "SIBC_CHECK " << sibcL[i] << " factor " << sibcF[i] << " area " << ar
+           << " rmsEt " << sqrt(et / max(ar, 1.0e-300))
+           << " power " << sibcF[i] * sibcZsRe / (2.0 * zs2) * et << endl;
+    }
+  }
+// EOM
+
+// Volume conductor (labConductor): volume and the power absorbed by
+// conduction, P = sigma/2 * int |E|^2 dV [W] (sigma in S/mm = 1e-3 condSigma
+// [S/m], E in V/mm, volume in mm^3); compare with the SIBC_CHECK power.
+macro condReport()
+  {
+    if (labConductor >= 0) {
+      real vol = int3d(Th, labConductor)(1.0);
+      real e2 = int3d(Th, labConductor)(square(abs(Esolx)) + square(abs(Esoly)) + square(abs(Esolz)));
+      cout << "COND_CHECK " << labConductor << " sigma " << condSigma << " volume " << vol
+           << " power " << 0.5e-3 * condSigma * e2 << endl;
+    }
+  }
+// EOM
+
+// Diagnostic: RMS of the tangential field on every PEC label (strong on()
+// must make it ~0, also on internal faces such as a zero-thickness trace).
+macro pecReport()
+  {
+    int[int] pecL = [pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+                     pecLabel5, pecLabel6, pecLabel7, pecLabel8];
+    for (int i = 0; i < pecL.n; i++) {
+      if (pecL[i] < 0) continue;
+      real ar = int2d(Th, pecL[i])(1.0);
+      real et = int2d(Th, pecL[i])(tangDot(real(Esolx), real(Esoly), real(Esolz), real(Esolx), real(Esoly), real(Esolz))
+                                 + tangDot(imag(Esolx), imag(Esoly), imag(Esolz), imag(Esolx), imag(Esoly), imag(Esolz)));
+      real en = int2d(Th, pecL[i])(square(abs(Esolx)) + square(abs(Esoly)) + square(abs(Esolz)));
+      cout << "PEC_CHECK " << pecL[i] << " area " << ar << " rmsEt " << sqrt(et / max(ar, 1.0e-300))
+           << " rmsE " << sqrt(en / max(ar, 1.0e-300)) << endl;
+    }
+  }
+// EOM

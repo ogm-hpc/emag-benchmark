@@ -1,0 +1,80 @@
+// PCB-benchmark fork of ../cslp_hx_precon.idp (2026-09-28, PCB_SOLVER_VERSION 0.1).
+// CSLP + HX gradient correction, 2-term additive form:
+//   cslpHxPrecon(r) = P^-1*r + G*(Mgrad^-1*(G^T*r))
+// P = aMaxwellShift and Mgrad = aMaxwellGrad from pcb_common.idp, so both carry
+// the same surface terms as A. The disabled 3rd (Pi / shifted vector-Laplacian)
+// term of cslp_hx_precon.idp is not forked.
+//
+// Include-style block. Caller-defined globals: mesh3 Th, func Pk, fespace Eh,
+// matrix<complex> Aloc, string petscOptions, varf aMaxwellShift, varf aMaxwellGrad,
+// int hxDirichletMask (pcb_case_config.idp).
+// On return: func complex[int] cslpHxPrecon(complex[int] & r).
+
+load "mat_edgeP1"
+
+// --- CSLP half: shifted operator P, solved via PETSc (petscOptions). ---
+Mat<complex> cslpHxP;
+{
+  macro ThPkPart()Edge03ds0// EOM
+  MatCreate(Th, cslpHxP, Pk);
+}
+cslpHxP = aMaxwellShift(Eh, Eh);
+set(cslpHxP, sparams = petscOptions);
+
+// --- HX gradient half: G + Mgrad (unshifted). ---
+// Dirichlet mask (hxDirichletMask = 1, pcb_case_config.idp; PCB standard of
+// run_pcb_benchmark.py run since handoff task I-9, settings 8.2): PEC is
+// imposed by on() as a penalty (diagonal tgv = 1e30, off-
+// diagonals kept). On a PEC edge, G*p carries the ~1e-30 values of p on the
+// Dirichlet nodes, which A multiplies back to O(|r|): the PEC rows of A*M^-1
+// get a spurious term the smoother (omega/tgv there) cannot correct. With the
+// mask, r is zeroed on the penalty rows before G^T and G*p after, i.e. the HX
+// correction of the constrained space. 0 (regress, --no-hx-mask) keeps the fork
+// identical to ../cslp_hx_precon.idp (regression, 7.5).
+complex[int] cslpHxMask(Aloc.n);
+cslpHxMask = 1.0;
+if (hxDirichletMask) {
+  complex[int] cslpHxDiag = Aloc.diag;
+  int nMasked = 0;
+  for (int i = 0; i < cslpHxMask.n; i++)
+    if (abs(cslpHxDiag[i]) > 1.0e20) { cslpHxMask[i] = 0.0; nMasked++; }
+  cout << "HX_DIRICHLET_MASK rows " << nMasked << " of " << cslpHxMask.n << endl;
+}
+matrix cslpHxGLoc;
+MatrixEdgeP1(cslpHxGLoc, Th);
+
+func PkCslpHxNode = P1;
+fespace CslpHxPh(Th, PkCslpHxNode);
+
+Mat<complex> cslpHxMgrad;
+MatCreate(Th, cslpHxMgrad, PkCslpHxNode);
+cslpHxMgrad = aMaxwellGrad(CslpHxPh, CslpHxPh);
+set(cslpHxMgrad, sparams = petscOptions);
+
+// Optional vector (Pi) correction (docs/paper_plan.md A1, PCB_SOLVER_VERSION 0.9;
+// hxVecTerm = 0 keeps the 2-term form): 1 Pi^T A Pi, 2 Pi^T (A + 2k0^2 Meps) Pi,
+// 3 Pi^T P Pi with the CSLP-shifted operator P.
+matrix<complex> hxVecShift;
+if (hxVecTerm == 3) hxVecShift = aMaxwellShift(Eh, Eh);
+include "pcb_hx_vec.idp"
+
+func complex[int] cslpHxPrecon(complex[int] & r) {
+  complex[int] fine = cslpHxP^-1 * r;
+
+  complex[int] rm(r.n);
+  rm = r;
+  if (hxDirichletMask) rm = cslpHxMask .* r;
+  complex[int] rNode = cslpHxGLoc' * rm;
+  complex[int] pNode = cslpHxMgrad^-1 * rNode;
+  complex[int] gradCorrection = cslpHxGLoc * pNode;
+  if (hxDirichletMask) gradCorrection = cslpHxMask .* gradCorrection;
+
+  complex[int] z(r.n);
+  z = fine;
+  z += gradCorrection;
+  if (hxVecTerm > 0) {
+    complex[int] vc = hxVecCorr(r);
+    z += vc;
+  }
+  return z;
+}

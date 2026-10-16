@@ -1,0 +1,321 @@
+// Edge03d Maxwell solver for benchmark meshes
+// This script expects runtime settings in runtime_case_config.idp.
+//
+// Time convention: exp(+i*omega*t) throughout -- outgoing waves ~ exp(-i*k*r),
+// lossy media eps = eps'*(1 - i*tan(delta)), Silver-Mueller term +i*k0*E_t.V_t.
+//
+// 2026-09-28 revision:
+//  * Coefficients are pre-evaluated ONCE as finite-element functions (material
+//    eps: P0; PML stretching: P1) instead of calling interpreted script funcs
+//    at every quadrature point (case2A assembly 17 s -> <1 s, identical matrix).
+//  * The PML is a proper anisotropic stretched-coordinate UPML (was an isotropic
+//    lossy layer eps + i*sigma/k0, whose +i sign is GAIN in this time convention).
+//  * LossyMaterial regions (case3E inclusion, case2F TEAM-19 rods) now get their
+//    real permittivity epsLossy (previously left at eps_r = 1).
+//  * Only the matrices a preset actually uses are assembled.
+//  * PHASE timing lines (PHASE <name> <seconds since start>) for the harness.
+
+load "msh3"
+load "gmsh"
+load "PETSc-complex"     // complex-valued matrix/RHS require the complex PETSc plugin
+load "Element_Mixte3d"   // provides the Edge03ds0 partition-of-unity element that
+                         // MatCreate() needs internally for Edge03d spaces
+macro dimension()3// EOM
+include "macro_ddm.idp"
+
+// NOTE: a plain FreeFEM matrix<complex> with set(A, sparams=...) does NOT attach a
+// PETSc KSP (it silently falls back to UMFPACK). PETSc-backed solves need a
+// Mat<complex> built via DmeshCreate()+MatCreate() on the assembly fespace
+// (pattern of examples/hpddm/maxwell-3d-PETSc.edp).
+
+include "runtime_case_config.idp"
+
+real tStart = clock();
+cout << "==========================================" << endl;
+cout << "Edge03d Maxwell solve" << endl;
+cout << "case = " << caseName << ", param = " << paramSetName << endl;
+cout << "mesh = " << meshFile << endl;
+cout << "outerMethod = " << outerMethod << ", krylov = " << krylovMethod << endl;
+cout << "usePML = " << usePML << ", useSM = " << useSM << endl;
+cout << "==========================================" << endl;
+
+mesh3 Th = gmshload3(meshFile);
+
+// MatCreate needs the element TYPE alias, not a bound fespace instance.
+func Pk = Edge03d;
+fespace Eh(Th, Pk);
+cout << "NDOF = " << Eh.ndof << endl;
+
+int[int] n2o;
+macro ThN2O()n2o// EOM
+DmeshCreate(Th);
+
+// Coefficients (material P0, UPML P1 tensors), integrand macros and the
+// bilinear forms aMaxwell / aMaxwellShift.
+include "maxwell_common.idp"
+
+
+// Gaussian volume source (x-polarized), evaluated exactly at quadrature points
+// (an inline expression, not a script func call; assembled once).
+real srcWidthInv = 1.0 / max(srcWidth, 1.0e-8);
+varf lRhs([Ex, Ey, Ez], [Vx, Vy, Vz]) =
+    int3d(Th)( srcAmp * exp(-(square((x - srcX0) * srcWidthInv) + square((y - srcY0) * srcWidthInv)
+                              + square((z - srcZ0) * srcWidthInv))) * Vx )
+  + on(pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+       pecLabel5, pecLabel6, pecLabel7, pecLabel8,
+       Ex = 0, Ey = 0, Ez = 0);
+
+complex[int] b(Eh.ndof);
+b = lRhs(0, Eh);
+Eh<complex> [Esolx, Esoly, Esolz];
+cout << "PHASE coefficients_rhs " << (clock() - tStart) << endl;
+
+// Settings shared by the hand-rolled drivers (gmres_precon.idp / cocg_precon.idp).
+macro runGmres()
+  int gmresN = Eh.ndof;
+  complex[int] gmresB(Eh.ndof);
+  gmresB = b;
+  complex[int] gmresX(Eh.ndof);
+  gmresX = 0.0;
+  real gmresRtol = outerRtol;
+  int gmresMaxIt = outerMaxIt;
+  int gmresRestart = gmresRestartCfg;
+  int gmresIterCount = 0;
+  real gmresRelRes = 1.0;
+  int gmresConverged = 0;
+  cout << "PHASE setup_done " << (clock() - tStart) << endl;
+  real tSolve0 = clock();
+  include "gmres_precon.idp"
+  cout << "SOLVE_TIME = " << (clock() - tSolve0) << endl;
+  if (gmresConverged)
+    cout << "Linear solve converged due to CONVERGED_RTOL iterations " << gmresIterCount << endl;
+  else
+    cout << "Linear solve did not converge due to DIVERGED_ITS iterations " << gmresIterCount << endl;
+  Esolx[] = gmresX;
+// EOM
+macro runCocg()
+  int cocgN = Eh.ndof;
+  complex[int] cocgB(Eh.ndof);
+  cocgB = b;
+  complex[int] cocgX(Eh.ndof);
+  cocgX = 0.0;
+  real cocgRtol = outerRtol;
+  int cocgMaxIt = outerMaxIt;
+  int cocgIterCount = 0;
+  real cocgRelRes = 1.0;
+  int cocgConverged = 0;
+  cout << "PHASE setup_done " << (clock() - tStart) << endl;
+  real tSolve0 = clock();
+  include "cocg_precon.idp"
+  cout << "SOLVE_TIME = " << (clock() - tSolve0) << endl;
+  if (cocgConverged)
+    cout << "Linear solve converged due to CONVERGED_RTOL iterations " << cocgIterCount << endl;
+  else
+    cout << "Linear solve did not converge due to DIVERGED_ITS iterations " << cocgIterCount << endl;
+  Esolx[] = cocgX;
+// EOM
+// COCG needs a FIXED, complex-symmetric preconditioner: allowed for cslp /
+// cslp_hx only when the inner solves are fixed linear operators (presets
+// cslp_mg / cslp_hx_mg: one GAMG V-cycle, "-ksp_type preonly"), not with an
+// inner Krylov solve (presets cslp / cslp_hx), which changes every iteration.
+macro runOuter()
+  if (krylovMethod == "cocg") {
+    if (petscOptions.find("preonly") < 0) {
+      cout << "ERROR: COCG requires a fixed preconditioner (inner '-ksp_type preonly')" << endl;
+      exit(1);
+    }
+    runCocg
+  } else {
+    runGmres
+  }
+// EOM
+
+if (outerMethod == "cslp") {
+  // Complex Shifted Laplacian Preconditioner: the true operator A is used only
+  // for mat-vecs (plain matrix<complex>); the shifted operator P is solved
+  // approximately by an inner PETSc GMRES+GAMG (loose rtol / few its, from
+  // petscOptions). The inexact, iteration-varying preconditioner is handled by
+  // the hand-rolled flexible-style GMRES (gmres_precon.idp keeps Z = M^-1 V).
+  // FreeFEM's AffineFGMRES was tried first and does not drive a Krylov
+  // iteration correctly with a complex Mat + custom precon (see
+  // problem_settings.md), hence the hand-rolled driver.
+  matrix<complex> Aloc = aMaxwell(Eh, Eh);
+  Mat<complex> P;
+  {
+    macro ThPkPart()Edge03ds0// EOM
+    MatCreate(Th, P, Pk);
+  }
+  P = aMaxwellShift(Eh, Eh);
+  set(P, sparams = petscOptions);
+  cout << "PHASE assembly " << (clock() - tStart) << endl;
+
+  func complex[int] matvec(complex[int] & v) {
+    complex[int] y = Aloc * v;
+    return y;
+  }
+  func complex[int] precon(complex[int] & v) {
+    complex[int] z = P^-1 * v;
+    return z;
+  }
+  runOuter
+} else if (outerMethod == "accel_ic") {
+  // Accelerated IC(0) (Fujiwara/Nakata/Fusayasu): IC(0) of A with each pivot
+  // started from alpha*a_ii -- computed by PETSc ICC(0) on A with its diagonal
+  // scaled by alpha (bit-identical to the former script implementation, see
+  // accel_ic_petsc.idp). Outer driver: hand-rolled GMRES or COCG (krylovMethod).
+  matrix<complex> Aloc = aMaxwell(Eh, Eh);
+  include "accel_ic_petsc.idp"
+  cout << "PHASE assembly " << (clock() - tStart) << endl;
+
+  func complex[int] matvec(complex[int] & v) {
+    complex[int] y = Aloc * v;
+    return y;
+  }
+  func complex[int] precon(complex[int] & v) {
+    complex[int] z = accelICPrecon(v);
+    return z;
+  }
+
+  if (krylovMethod == "cocg") {
+    int cocgN = Eh.ndof;
+    complex[int] cocgB(Eh.ndof);
+    cocgB = b;
+    complex[int] cocgX(Eh.ndof);
+    cocgX = 0.0;
+    real cocgRtol = outerRtol;
+    int cocgMaxIt = outerMaxIt;
+    int cocgIterCount = 0;
+    real cocgRelRes = 1.0;
+    int cocgConverged = 0;
+    cout << "PHASE setup_done " << (clock() - tStart) << endl;
+    real tSolve0 = clock();
+    include "cocg_precon.idp"
+    cout << "SOLVE_TIME = " << (clock() - tSolve0) << endl;
+    if (cocgConverged)
+      cout << "Linear solve converged due to CONVERGED_RTOL iterations " << cocgIterCount << endl;
+    else
+      cout << "Linear solve did not converge due to DIVERGED_ITS iterations " << cocgIterCount << endl;
+    Esolx[] = cocgX;
+  } else {
+    runGmres
+  }
+} else if (outerMethod == "hx") {
+  // Hiptmair-Xu-style auxiliary-space preconditioner, 2-term form (Jacobi
+  // smoother + gradient correction); see hx_precon.idp. GMRES only.
+  matrix<complex> Aloc = aMaxwell(Eh, Eh);
+  include "hx_precon.idp"
+  cout << "PHASE assembly " << (clock() - tStart) << endl;
+
+  func complex[int] matvec(complex[int] & v) {
+    complex[int] y = Aloc * v;
+    return y;
+  }
+  func complex[int] precon(complex[int] & v) {
+    complex[int] z = hxPrecon(v);
+    return z;
+  }
+  runGmres
+} else if (outerMethod == "cslp_hx") {
+  // CSLP + HX gradient correction (2-term form); see cslp_hx_precon.idp. GMRES only.
+  matrix<complex> Aloc = aMaxwell(Eh, Eh);
+  include "cslp_hx_precon.idp"
+  cout << "PHASE assembly " << (clock() - tStart) << endl;
+
+  func complex[int] matvec(complex[int] & v) {
+    complex[int] y = Aloc * v;
+    return y;
+  }
+  func complex[int] precon(complex[int] & v) {
+    complex[int] z = cslpHxPrecon(v);
+    return z;
+  }
+  runOuter
+} else if (outerMethod == "pc_cocg") {
+  // COCG with a PETSc preconditioner (gs/ssor/amg_gamg/...): the PC is applied
+  // once per iteration through a "-ksp_type preonly" solve (petscOptions), the
+  // COCG recurrence is the hand-rolled cocg_precon.idp. PETSc's own
+  // "-ksp_type cg -ksp_cg_type symmetric" is NOT used: KSPSolve_CG (3.22)
+  // stops with DIVERGED_INDEFINITE_MAT whenever Re(p^T A p) changes sign
+  // between iterations -- an SPD heuristic that is meaningless for complex-
+  // symmetric COCG, where p^T A p is complex (it stopped every COCG run of this
+  // benchmark after 1-2 iterations).
+  matrix<complex> Aloc = aMaxwell(Eh, Eh);
+  Mat<complex> Apc;
+  {
+    macro ThPkPart()Edge03ds0// EOM
+    MatCreate(Th, Apc, Pk);
+  }
+  Apc = Aloc;
+  set(Apc, sparams = petscOptions);
+  cout << "PHASE assembly " << (clock() - tStart) << endl;
+
+  func complex[int] matvec(complex[int] & v) {
+    complex[int] y = Aloc * v;
+    return y;
+  }
+  func complex[int] precon(complex[int] & v) {
+    complex[int] z = Apc^-1 * v;
+    return z;
+  }
+  int cocgN = Eh.ndof;
+  complex[int] cocgB(Eh.ndof);
+  cocgB = b;
+  complex[int] cocgX(Eh.ndof);
+  cocgX = 0.0;
+  real cocgRtol = outerRtol;
+  int cocgMaxIt = outerMaxIt;
+  int cocgIterCount = 0;
+  real cocgRelRes = 1.0;
+  int cocgConverged = 0;
+  cout << "PHASE setup_done " << (clock() - tStart) << endl;
+  real tSolve0 = clock();
+  include "cocg_precon.idp"
+  cout << "SOLVE_TIME = " << (clock() - tSolve0) << endl;
+  if (cocgConverged)
+    cout << "Linear solve converged due to CONVERGED_RTOL iterations " << cocgIterCount << endl;
+  else
+    cout << "Linear solve did not converge due to DIVERGED_ITS iterations " << cocgIterCount << endl;
+  Esolx[] = cocgX;
+} else {
+  // PETSc KSP + PC (jacobi/gs/ssor/ic0/ilu/amg_gamg/...), options from petscOptions.
+  Mat<complex> A;
+  {
+    macro ThPkPart()Edge03ds0// EOM
+    MatCreate(Th, A, Pk);
+  }
+  A = aMaxwell(Eh, Eh);
+  string kspOpt = petscOptions;
+  if (backend == "hypre") kspOpt = kspOpt + " -pc_type hypre -pc_hypre_type boomeramg";
+  set(A, sparams = kspOpt);
+  cout << "PHASE assembly " << (clock() - tStart) << endl;
+  cout << "PHASE setup_done " << (clock() - tStart) << endl;
+
+  // Receive into the fespace array view so PETSc's numbering is mapped back.
+  real tSolve0 = clock();
+  Esolx[] = A^-1 * b;
+  cout << "SOLVE_TIME = " << (clock() - tSolve0) << endl;
+}
+
+cout << "L2 norm(E) = " << Esolx[].l2 << endl;
+
+if (usePML) {
+  // PML diagnostics: RMS |E| in the core, and in the outer half of the PML shell
+  // (penetration > pmlThick/2 in any direction); plus |E|^2 integrated over a
+  // fixed inner box (for reflection checks across PML thicknesses).
+  Ph0 dPen = max(max(max(x - pmlXmax, pmlXmin - x), max(y - pmlYmax, pmlYmin - y)), max(z - pmlZmax, pmlZmin - z));
+  Ph0 inCore = (dPen <= 0);
+  Ph0 inOuter = (dPen > 0.5 * pmlThick);
+  real vCore = int3d(Th)(inCore), vOuter = int3d(Th)(inOuter);
+  real eCore = int3d(Th)(inCore * (square(abs(Esolx)) + square(abs(Esoly)) + square(abs(Esolz))));
+  real eOuter = int3d(Th)(inOuter * (square(abs(Esolx)) + square(abs(Esoly)) + square(abs(Esolz))));
+  real hb = 0.45 * min(pmlXmax - pmlXmin, min(pmlYmax - pmlYmin, pmlZmax - pmlZmin));
+  real eInner = int3d(Th)((abs(x) < hb) * (abs(y) < hb) * (abs(z) < hb)
+                          * (square(abs(Esolx)) + square(abs(Esoly)) + square(abs(Esolz))));
+  cout << "PML_DIAG rmsCore " << sqrt(eCore / vCore) << " rmsPmlOuter " << sqrt(eOuter / max(vOuter, 1e-30))
+       << " ratio " << sqrt(eOuter / max(vOuter, 1e-30)) / sqrt(eCore / vCore)
+       << " energyInnerBox " << eInner << " halfWidth " << hb << endl;
+}
+cout << "PHASE total " << (clock() - tStart) << endl;
+
+// Solution save / error against a reference (solSaveFile, solRefFile; off by default).
+include "solution_check.idp"

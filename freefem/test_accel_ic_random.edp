@@ -1,0 +1,78 @@
+// Repro attempt #3: random sparse symmetric complex matrix with irregular
+// (non-banded) connectivity, so eliminating a row DOES create genuine
+// fill-in among its neighbors (unlike the banded test, which had none).
+
+int n = 40;
+int targetDeg = 12;
+
+complex[int, int] Adense(n, n);
+Adense = 0.0;
+for (int i = 0; i < n; i++) Adense(i,i) = 15.0 + 0.5*(i%4) + 1i*0.3;
+
+randinit(12345);
+for (int i = 0; i < n; i++) {
+  int added = 0;
+  int tries = 0;
+  while (added < targetDeg/2 && tries < 200) {
+    tries += 1;
+    int j = i + 1 + (randint32() % (n - i - 1 > 0 ? n - i - 1 : 1));
+    if (j <= i || j >= n) continue;
+    if (Adense(i,j) != 0.0) continue;
+    real re = 0.3 + 0.7*randreal1();
+    real im = 0.1*randreal1();
+    Adense(i,j) = re + 1i*im;
+    Adense(j,i) = Adense(i,j);
+    added += 1;
+  }
+}
+
+int nnzMax = n*n;
+int[int] rows(nnzMax), cols(nnzMax);
+complex[int] vals(nnzMax);
+int t = 0;
+for (int i = 0; i < n; i++)
+  for (int j = 0; j < n; j++)
+    if (Adense(i,j) != 0.0) { rows[t]=i; cols[t]=j; vals[t]=Adense(i,j); t += 1; }
+rows.resize(t); cols.resize(t); vals.resize(t);
+cout << "n=" << n << " nnz=" << t << " avgDeg=" << (1.0*t/n) << endl;
+
+matrix<complex> Aloc = [rows, cols, vals];
+
+complex[int] xtrue(n);
+for (int i = 0; i < n; i++) xtrue[i] = 1.0 + 1i*(i - n/2.0)/n;
+complex[int] b(n);
+b = Aloc * xtrue;
+
+matrix<complex> aicA = Aloc;
+int aicN = n;
+real aicAlpha = 1.0;
+include "accel_ic_precon.idp"
+
+complex[int] z = accelICPrecon(b);
+complex[int] Az = Aloc * z;
+complex[int] resid(n);
+resid = Az;
+resid -= b;
+cout << "ALPHA=0: ||z||=" << z.l2 << " ||b||=" << b.l2 << " ||A*z-b||=" << resid.l2 << endl;
+
+func complex[int] matvec(complex[int] & v) {
+  complex[int] y = Aloc * v;
+  return y;
+}
+func complex[int] precon(complex[int] & v) {
+  complex[int] w = accelICPrecon(v);
+  return w;
+}
+int gmresN = n;
+complex[int] gmresB(n);
+gmresB = b;
+complex[int] gmresX(n);
+gmresX = 0.0;
+real gmresRtol = 1e-10;
+int gmresMaxIt = 60;
+int gmresRestart = 15;
+int gmresIterCount = 0;
+real gmresRelRes = 1.0;
+int gmresConverged = 0;
+include "gmres_precon.idp"
+cout << "GMRES: iters=" << gmresIterCount << " relRes=" << gmresRelRes << " converged=" << gmresConverged << endl;

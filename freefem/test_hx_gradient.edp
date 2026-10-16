@@ -1,0 +1,61 @@
+// Feasibility check: does the discrete-gradient machinery used by the real
+// (non-complex) maxwell-3d-PETSc.edp AMS example -- mat_edgeP1's
+// MatrixEdgeP1() plus the Mat(A,B,GLoc) wrapper constructor -- also work
+// with Mat<complex> (needed to build a from-scratch Hiptmair-Xu
+// preconditioner, since HYPRE AMS itself is unavailable in this complex
+// PETSc build)?
+
+load "msh3"
+load "gmsh"
+load "PETSc-complex"
+load "mat_edgeP1"
+load "Element_Mixte3d"
+macro dimension()3// EOM
+include "macro_ddm.idp"
+
+mesh3 Th = cube(6, 6, 6);
+func Pk = Edge03d;
+func PkNode = P1;
+
+Mat<complex> A;
+int[int] n2o;
+macro ThN2O()n2o// EOM
+DmeshCreate(Th);
+{
+  macro ThPkPart()Edge03ds0// EOM
+  MatCreate(Th, A, Pk);
+}
+
+fespace Eh(Th, Pk);
+varf vA([Ex,Ey,Ez],[Vx,Vy,Vz]) =
+    int3d(Th)(
+        (dy(Ez)-dz(Ey))*(dy(Vz)-dz(Vy)) + (dz(Ex)-dx(Ez))*(dz(Vx)-dx(Vz)) + (dx(Ey)-dy(Ex))*(dx(Vy)-dy(Vx))
+      + (Ex*Vx+Ey*Vy+Ez*Vz)
+    ) + on(1,2,3,4,5,6, Ex=0,Ey=0,Ez=0);
+A = vA(Eh, Eh);
+
+cout << "Built Mat<complex> A (edge), ndof=" << Eh.ndof << endl;
+
+matrix GLoc;
+MatrixEdgeP1(GLoc, Th);
+cout << "MatrixEdgeP1 ok, GLoc.nnz=" << GLoc.nnz << endl;
+
+Mat<complex> B;
+MatCreate(Th, B, PkNode);
+fespace VhNode(Th, PkNode);
+cout << "Built Mat<complex> B (node), ndof=" << VhNode.ndof << endl;
+
+// Mat<complex> G(A, B, GLoc); -- confirmed unavailable (no matching overload
+// for complex Mat in this build). Test instead: can the PLAIN real sparse
+// GLoc be used directly for G*v / G^T*v against a COMPLEX vector, bypassing
+// PETSc's Mat wrapper entirely (the same strategy CSLP used for Aloc)?
+fespace VhNodeCheck(Th, PkNode);
+complex[int] testNode(VhNodeCheck.ndof);
+for (int i = 0; i < testNode.n; i++) testNode[i] = 1.0 + 1i*0.5;
+complex[int] edgeResult = GLoc * testNode;
+cout << "GLoc * complex[int] OK, ||result||=" << edgeResult.l2 << " (edge ndof=" << Eh.ndof << ")" << endl;
+
+complex[int] testEdge(Eh.ndof);
+for (int i = 0; i < testEdge.n; i++) testEdge[i] = 1.0 - 1i*0.3;
+complex[int] nodeResultT = GLoc' * testEdge;
+cout << "GLoc' * complex[int] OK, ||result||=" << nodeResultT.l2 << " (node ndof=" << VhNodeCheck.ndof << ")" << endl;

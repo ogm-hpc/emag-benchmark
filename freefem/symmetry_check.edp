@@ -1,0 +1,48 @@
+// Complex-symmetry check of preconditioners (COCG requires B^T = B, unconjugated):
+//   sym(B) = |x^T B y - y^T B x| / (|x| |B y|)   for random complex x, y.
+// Checks: CSLP with one GAMG V-cycle on the shifted operator (preset cslp_mg),
+// and CSLP+HX with one V-cycle on both auxiliary problems (preset cslp_hx_mg).
+// Uses the runtime_case_config.idp of a cslp_hx_mg job (petscOptions = preonly gamg).
+load "msh3"
+load "gmsh"
+load "PETSc-complex"
+load "Element_Mixte3d"
+macro dimension()3// EOM
+include "macro_ddm.idp"
+include "runtime_case_config.idp"
+mesh3 Th = gmshload3(meshFile);
+func Pk = Edge03d;
+fespace Eh(Th, Pk);
+int[int] n2o;
+macro ThN2O()n2o// EOM
+DmeshCreate(Th);
+include "maxwell_common.idp"
+matrix<complex> Aloc = aMaxwell(Eh, Eh);
+include "cslp_hx_precon.idp"
+
+int n = Eh.ndof;
+complex[int] x(n), y(n);
+randinit(11);
+for (int i = 0; i < n; i++) { x[i] = randreal1() - 0.5 + 1i * (randreal1() - 0.5); y[i] = randreal1() - 0.5 + 1i * (randreal1() - 0.5); }
+complex[int] dg = Aloc.diag;
+for (int i = 0; i < n; i++) if (abs(dg[i]) > 1e20) { x[i] = 0; y[i] = 0; }   // PEC (eliminated) DOFs
+
+macro symOf(By, Bx, name)
+{
+  complex[int] t1 = x .* By, t2 = y .* Bx;
+  cout << "SYM " << name << " " << abs(t1.sum - t2.sum) / (x.l2 * By.l2) << endl;
+}
+// EOM
+{
+  complex[int] By = cslpHxP^-1 * y, Bx = cslpHxP^-1 * x;
+  symOf(By, Bx, "cslp_mg (one V-cycle on M_beta)")
+}
+{
+  complex[int] By = cslpHxPrecon(y), Bx = cslpHxPrecon(x);
+  symOf(By, Bx, "cslp_hx_mg (M_beta V-cycle + G (V-cycle on G^T A G) G^T)")
+}
+{
+  complex[int] By1 = cslpHxP^-1 * y, By2 = cslpHxP^-1 * y;
+  By1 -= By2;
+  cout << "REPEAT cslp_mg |B y - B y| / |B y| " << By1.l2 / By2.l2 << endl;
+}

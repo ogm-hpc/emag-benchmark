@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use this benchmark, please cite the paper and the data set."
+title: "emag-benchmark: iterative solver benchmark for high-frequency electromagnetic finite element analysis"
+type: software
+authors:
+  - family-names: Ogino
+    given-names: Masao
+    affiliation: Daido University
+version: "1.0"
+license: MIT
+repository-code: "https://github.com/ogm-hpc/emag-benchmark"
+keywords:
+  - benchmark
+  - iterative solver
+  - preconditioner
+  - Maxwell equations
+  - edge element
+  - finite element method
+references:
+  - type: dataset
+    title: "Iterative Solver Benchmark for High-Frequency Electromagnetic Finite Element Analysis, all instances, version 1.0"
+    authors:
+      - family-names: Ogino
+        given-names: Masao
+        affiliation: Daido University
+    doi: "10.5281/zenodo.23413640"
+    license: CC-BY-4.0

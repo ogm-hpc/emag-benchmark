@@ -1,0 +1,22 @@
+P04-1_m100: no result P04_P04-1_m100__mumps_direct.json
+P04-2_m100: no result P04_P04-2_m100__mumps_direct.json
+P04-3_m100: no result P04_P04-3_m100__mumps_direct.json
+== P04-1  eps2=1  f=5.0 GHz  NDOF=329917  status=converged  rss=6.749 GB
+   S11  0.7561 (  -2.43 dB)     8.51 deg
+   S21  0.6260 (  -4.07 dB)    98.28 deg
+   eps_eff from the S21 phase: 1.143 | series: eps_eff 1.000, Z0 153.6 Ohm | upper (eps2 everywhere): eps_eff 1.000, Z0 153.6 Ohm | L/lambda_g=0.713
+== P04-2  eps2=4.4  f=5.0 GHz  NDOF=332233  status=converged  rss=6.519 GB
+   S11  0.2157 ( -13.32 dB)   -57.41 deg
+   S21  0.9366 (  -0.57 dB)    24.77 deg
+   eps_eff from the S21 phase: 2.012 | series: eps_eff 1.392, Z0 130.2 Ohm | upper (eps2 everywhere): eps_eff 3.082, Z0 87.5 Ohm | L/lambda_g=0.946
+== P04-3  eps2=10  f=5.0 GHz  NDOF=338802  status=converged  rss=6.472 GB
+   S11  0.4115 (  -7.71 dB)    45.11 deg
+   S21  0.8769 (  -1.14 dB)   -42.79 deg
+   eps_eff from the S21 phase: 2.742 | series: eps_eff 1.508, Z0 125.1 Ohm | upper (eps2 everywhere): eps_eff 6.479, Z0 60.3 Ohm | L/lambda_g=1.105
+== P04-4  eps2=100  f=5.0 GHz  NDOF=491626  status=converged  rss=9.349 GB
+   S11  0.1849 ( -14.66 dB)   126.04 deg
+   S21  0.8709 (  -1.20 dB)  -134.58 deg
+   eps_eff from the S21 phase: 4.278 | series: eps_eff 1.607, Z0 121.1 Ohm | upper (eps2 everywhere): eps_eff 60.996, Z0 19.7 Ohm | L/lambda_g=1.380
+== checks
+   P04-1: no dielectric, eps_eff 1.143 vs 1 (+14.3 %, tol 15 %)  OK
+   own mesh: eps_eff 1.143 (P04-1) < 2.012 (P04-2) < 2.742 (P04-3) < 4.278 (P04-4)  (by continuity; all below the upper values: OK)

@@ -1,0 +1,203 @@
+// Accelerated Incomplete Cholesky, complex-symmetric (non-Hermitian) version,
+// matching the reference func_icc_make(): A ~= L D L^T, no-fill pattern
+// (same sparsity as A), STANDARD IC(0) elimination (fill-in outside the
+// pattern is simply dropped -- no redistribution), where the ONLY
+// modification is that each row's ORIGINAL diagonal a_ii is multiplied by
+// an acceleration factor af BEFORE subtracting the row's accumulated
+// elimination terms: d_i = af*a_ii - sum(earlier contributions). af=1.0 is
+// plain IC(0); af in [1.05, 1.2] is the typical literature range (Fujiwara,
+// Nakata & Fusayasu, IEEE Trans. Magn., vol.29, no.2, 1993) that inflates
+// the diagonal for stability, NOT the Ajiz-Jennings/Gustafsson MILU
+// (row-sum-preserving fill redistribution) an earlier version of this file
+// implemented -- that was a different algorithm and is not what this
+// project's reference implementation does.
+//
+// Include-style code block (FreeFEM funcs can't take generic func callbacks),
+// operating on caller-defined globals:
+//   matrix<complex> aicA      -- the matrix to factorize (symmetric pattern)
+//   int aicN                  -- aicA's dimension
+//   real aicAlpha              -- acceleration factor af
+// On return: aicDiag, aicFwdCol/aicFwdVal (per-row j<i entries, for forward
+// substitution) and aicBackCol/aicBackVal (per-row j>i entries, for backward
+// substitution) are built, and a ready-to-use
+//   func complex[int] accelICPrecon(complex[int] & r)
+// is defined (solves L D L^T z = r via forward/diagonal/backward substitution).
+
+// Persistent outputs (used by accelICPrecon below) must live OUTSIDE the
+// setup block: variables declared inside a { } block go out of scope when
+// it closes, and accelICPrecon needs these afterwards.
+complex[int] aicDiag(aicN);
+aicDiag = 0.0;
+complex[int] aicOrigDiag(aicN);
+aicOrigDiag = 0.0;
+int[int][int] aicFwdCol(aicN);
+complex[int][int] aicFwdVal(aicN);
+int[int][int] aicBackCol(aicN);
+complex[int][int] aicBackVal(aicN);
+
+{
+  real aicT0 = clock();
+  int[int] aicI, aicJ;
+  complex[int] aicC;
+  [aicI, aicJ, aicC] = aicA;
+  cout << "AIC_DIAG extract n=" << aicN << " nnz=" << aicI.n << " t=" << (clock()-aicT0) << endl;
+
+  // Per-row mutable neighbor lists, split into upper (col > row) and lower
+  // (col < row) parts, each sorted by column. IC(0) never adds new pattern
+  // entries, so these are fixed-size once built from the original COO.
+  int[int] upDeg(aicN), loDeg(aicN);
+  upDeg = 0;
+  loDeg = 0;
+  for (int t = 0; t < aicI.n; t++) {
+    int i = aicI[t], j = aicJ[t];
+    if (i == j) continue;
+    if (j > i) upDeg[i] += 1;
+    else loDeg[i] += 1;
+  }
+
+  int[int][int] aicUpperCol(aicN), aicLowerCol(aicN);
+  complex[int][int] aicUpperVal(aicN), aicLowerVal(aicN);
+  for (int i = 0; i < aicN; i++) {
+    aicUpperCol[i].resize(upDeg[i]);
+    aicUpperVal[i].resize(upDeg[i]);
+    aicLowerCol[i].resize(loDeg[i]);
+    aicLowerVal[i].resize(loDeg[i]);
+  }
+  int[int] upFill(aicN), loFill(aicN);
+  upFill = 0;
+  loFill = 0;
+  for (int t = 0; t < aicI.n; t++) {
+    int i = aicI[t], j = aicJ[t];
+    complex v = aicC[t];
+    if (i == j) { aicDiag[i] = v; aicOrigDiag[i] = v; continue; }
+    if (j > i) { aicUpperCol[i][upFill[i]] = j; aicUpperVal[i][upFill[i]] = v; upFill[i] += 1; }
+    else       { aicLowerCol[i][loFill[i]] = j; aicLowerVal[i][loFill[i]] = v; loFill[i] += 1; }
+  }
+  // Sort each row's upper-neighbor list by column (simple insertion sort --
+  // rows are short, this is only run once at preconditioner setup).
+  for (int i = 0; i < aicN; i++) {
+    int d = upDeg[i];
+    for (int a = 1; a < d; a++) {
+      int keyC = aicUpperCol[i][a];
+      complex keyV = aicUpperVal[i][a];
+      int b = a - 1;
+      while (b >= 0 && aicUpperCol[i][b] > keyC) {
+        aicUpperCol[i][b + 1] = aicUpperCol[i][b];
+        aicUpperVal[i][b + 1] = aicUpperVal[i][b];
+        b -= 1;
+      }
+      aicUpperCol[i][b + 1] = keyC;
+      aicUpperVal[i][b + 1] = keyV;
+    }
+  }
+  cout << "AIC_DIAG rowlists+sort t=" << (clock()-aicT0) << endl;
+
+  // Structures accumulated DURING elimination, indexed by the LARGER row j:
+  // aicFwdCol[j]/aicFwdVal[j] will hold (i, L_ji) for every pivot i<j
+  // that had j as an upper neighbor -- used for forward substitution. Sized
+  // up-front from the symmetric pattern (loDeg[j] == exactly this count).
+  for (int j = 0; j < aicN; j++) {
+    aicFwdCol[j].resize(loDeg[j]);
+    aicFwdVal[j].resize(loDeg[j]);
+  }
+  int[int] fwdFill(aicN);
+  fwdFill = 0;
+
+  // aicBackCol[i]/aicBackVal[i]: row i's OWN upper neighbors (j>i) with their
+  // finalized L_ji factor values -- used directly by backward substitution.
+  // aicUpperCol[i]'s column list never changes (no-fill IC(0)), so this just
+  // mirrors it; aicBackVal is filled in as each row i is processed as pivot.
+  for (int i = 0; i < aicN; i++) {
+    aicBackCol[i].resize(upDeg[i]);
+    aicBackVal[i].resize(upDeg[i]);
+    for (int a = 0; a < upDeg[i]; a++) aicBackCol[i][a] = aicUpperCol[i][a];
+  }
+
+  func int findCol(int row, int col) {
+    // Binary search aicUpperCol[row] for col; returns index or -1.
+    int lo = 0, hi = upDeg[row] - 1;
+    while (lo <= hi) {
+      int mid = (lo + hi) / 2;
+      int c = aicUpperCol[row][mid];
+      if (c == col) return mid;
+      else if (c < col) lo = mid + 1;
+      else hi = mid - 1;
+    }
+    return -1;
+  }
+
+  real pivotFloor = 1.0e-12;
+  int aicProgressStep = max(aicN / 10, 1);
+  for (int i = 0; i < aicN; i++) {
+    if (i % aicProgressStep == 0) cout << "AIC_DIAG elim i=" << i << "/" << aicN << " t=" << (clock()-aicT0) << endl;
+    // di = af*a_ii - (accumulated in-pattern elimination contributions from
+    // earlier pivots, already subtracted into aicDiag[i] via the j==k branch
+    // below). aicDiag[i] currently holds (a_ii - contributions); adding back
+    // aicOrigDiag[i]*(af-1) turns that into (af*a_ii - contributions), the
+    // reference formula's val[]*af - dd.
+    complex di = aicDiag[i] + aicOrigDiag[i] * (aicAlpha - 1.0);
+    if (abs(di) < pivotFloor) di = (real(di) >= 0.0 ? pivotFloor : -pivotFloor);
+    aicDiag[i] = di;
+    int d = upDeg[i];
+    // L_ji = A_ij(current) / d_i for each upper neighbor j of row i.
+    complex[int] Lval(d);
+    for (int a = 0; a < d; a++) Lval[a] = aicUpperVal[i][a] / di;
+    // Record (i, L_ji) into row j's forward-substitution list, and into row
+    // i's own backward-substitution list (row i's upper neighbors + L_ji).
+    for (int a = 0; a < d; a++) {
+      int j = aicUpperCol[i][a];
+      aicFwdCol[j][fwdFill[j]] = i;
+      aicFwdVal[j][fwdFill[j]] = Lval[a];
+      fwdFill[j] += 1;
+      aicBackVal[i][a] = Lval[a];
+    }
+    // Submatrix update over all pairs (j,k), j<=k, among row i's upper
+    // neighbors. Standard (fill-dropping) IC(0): if (j,k) is NOT in the
+    // original pattern, the contribution is simply DROPPED (matching the
+    // reference's zero-initialized L2 for un-set positions) -- no
+    // redistribution to other diagonals.
+    for (int a = 0; a < d; a++) {
+      int j = aicUpperCol[i][a];
+      for (int c = a; c < d; c++) {
+        int k = aicUpperCol[i][c];
+        complex contrib = Lval[a] * aicUpperVal[i][c];
+        if (j == k) {
+          aicDiag[j] -= contrib;
+        } else {
+          int idx = findCol(j, k);
+          if (idx >= 0) aicUpperVal[j][idx] -= contrib;
+        }
+      }
+    }
+  }
+
+  // Guard against exact-zero pivots that could still slip through.
+  for (int i = 0; i < aicN; i++) {
+    if (abs(aicDiag[i]) < pivotFloor) aicDiag[i] = (real(aicDiag[i]) >= 0.0 ? pivotFloor : -pivotFloor);
+  }
+}
+
+func complex[int] accelICPrecon(complex[int] & r) {
+  complex[int] y(aicN);
+  // Forward solve: L y = r, L unit lower-triangular, row i's sub-diagonal
+  // entries are exactly aicFwdCol[i]/aicFwdVal[i] (columns < i).
+  for (int i = 0; i < aicN; i++) {
+    complex s = r[i];
+    int d = aicFwdCol[i].n;
+    for (int a = 0; a < d; a++) s -= aicFwdVal[i][a] * y[aicFwdCol[i][a]];
+    y[i] = s;
+  }
+  // Diagonal scale.
+  for (int i = 0; i < aicN; i++) y[i] /= aicDiag[i];
+  // Backward solve: L^T z = y, using row i's own upper-neighbor L_ji values
+  // captured into aicBackCol/aicBackVal at setup time (see above).
+  complex[int] z(aicN);
+  z = y;
+  for (int i = aicN - 1; i >= 0; i--) {
+    complex s = z[i];
+    int d = aicBackCol[i].n;
+    for (int a = 0; a < d; a++) s -= aicBackVal[i][a] * z[aicBackCol[i][a]];
+    z[i] = s;
+  }
+  return z;
+}

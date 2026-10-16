@@ -1,0 +1,305 @@
+// HX 3rd term (vector / Pi correction) toy check, docs/paper_plan.md task A1.
+//
+// The 3-term HX of ../hx_precon.idp (Mvec = Pi^T A Pi, PEC nodes eliminated,
+// inner GMRES+GAMG) made GMRES stagnate bit-for-bit on ../test_hx_toy.edp
+// (problem_settings.md, 2026-07-29) and was disabled. This script separates the
+// candidate causes with EXACT inner solves (sparse direct, no GAMG), so that the
+// inner-solver inexactness is out of the picture:
+//
+//   vec 0  none                         (2-term HX: smoother + gradient)
+//   vec 1  Pi^T A  Pi, PEC nodes eliminated   (the disabled construction)
+//   vec 2  Pi^T A+ Pi, PEC nodes eliminated   (A+ = K + k0^2 M: SPD, AMS-like)
+//   vec 3  Pm^T A  Pm, Pm = Pi with the PEC (penalty) edge rows zeroed
+//   vec 4  Pm^T A+ Pm
+//   vec 5  as vec 1, inner GMRES + GAMG (rtol 1e-2, <= 20 its; ../hx_precon.idp)
+//   vec 6  as vec 2, inner GMRES + GAMG
+//   vec 7  as vec 5, with the Dirichlet mask on the output (Pi u zeroed on PEC edges)
+//   vec 8  as vec 6, with the mask
+//
+// Finding (2026-10-04, WSL, n = 5): vec 1, 2 converge (78-79 its; the 2-term
+// form does not in 200), vec 5, 6 stagnate at relres = 1 as in July. Cause: the
+// iterative inner solution is not exactly 0 on the eliminated PEC nodes, Pi
+// carries it onto the PEC edges, and the penalty rows of A (1e30) blow it up
+// (|A vc| ~ 1e26). Same mechanism as the gradient term (handoff task I-8);
+// the output mask (vec 7, 8) removes it.
+// (vec 3, 4 give NaN: the masked Galerkin matrix is singular beyond the zero
+// rows. Kept as a record; not a candidate.)
+//
+// smoother 0 = Jacobi (omega D^-1, current), 1 = symmetric Gauss-Seidel (PETSc
+// SOR, symmetric). The gradient term always uses the Dirichlet mask of
+// pcb_hx_precon.idp (PCB standard).
+//
+// Outer: hand-rolled flexible GMRES(30) (../gmres_precon.idp), 200 iterations.
+// RHS A: a discrete gradient (manufactured, exact); RHS B: a Gaussian source.
+// Output lines "RESULT <rhs> sm=<s> vec=<v> it=<n> relres=<r> conv=<0|1>".
+//
+// Run (from freefem/pcb):
+//   FreeFem++-mpi -nw -v 0 test_hx3_toy.edp [-n 5] [-k 6.283185] [-maxit 200]
+
+load "msh3"
+load "PETSc-complex"
+load "Element_Mixte3d"
+load "mat_edgeP1"
+macro dimension()3// EOM
+include "macro_ddm.idp"
+include "getARGV.idp"
+
+int nCube = getARGV("-n", 5);
+real k0 = getARGV("-k", 2.0 * pi);
+int maxIt = getARGV("-maxit", 200);
+
+mesh3 Th = cube(nCube, nCube, nCube);
+func Pk = Edge03d;
+fespace Eh(Th, Pk);
+fespace Ph(Th, P1);
+
+macro dot3(a1,a2,a3,b1,b2,b3) ((a1)*(b1) + (a2)*(b2) + (a3)*(b3)) //
+macro curlDot(Ex,Ey,Ez,Vx,Vy,Vz) dot3(dy(Ez) - dz(Ey), dz(Ex) - dx(Ez), dx(Ey) - dy(Ex),
+                                      dy(Vz) - dz(Vy), dz(Vx) - dx(Vz), dx(Vy) - dy(Vx)) //
+
+Mat<complex> A;
+int[int] n2o;
+macro ThN2O()n2o// EOM
+DmeshCreate(Th);
+{
+  macro ThPkPart()Edge03ds0// EOM
+  MatCreate(Th, A, Pk);
+}
+
+varf aMaxwell([Ex, Ey, Ez], [Vx, Vy, Vz]) =
+    int3d(Th)( curlDot(Ex, Ey, Ez, Vx, Vy, Vz) - (k0 * k0) * dot3(Ex, Ey, Ez, Vx, Vy, Vz) )
+  + on(1, 2, 3, 4, 5, 6, Ex = 0, Ey = 0, Ez = 0);
+varf aPlus([Ex, Ey, Ez], [Vx, Vy, Vz]) =
+    int3d(Th)( curlDot(Ex, Ey, Ez, Vx, Vy, Vz) + (k0 * k0) * dot3(Ex, Ey, Ez, Vx, Vy, Vz) )
+  + on(1, 2, 3, 4, 5, 6, Ex = 0, Ey = 0, Ez = 0);
+matrix<complex> Aloc = aMaxwell(Eh, Eh);
+matrix<complex> ApLoc = aPlus(Eh, Eh);
+int nE = Eh.ndof;
+cout << "TOY n=" << nCube << " k0=" << k0 << " edges=" << nE << " nodes=" << Ph.ndof << endl;
+
+// --- smoothers -------------------------------------------------------------
+complex[int] diagInv = Aloc.diag;
+for (int i = 0; i < nE; i++) diagInv[i] = (abs(diagInv[i]) < 1e-12) ? 1e12 : 1.0 / diagInv[i];
+A = Aloc;
+set(A, sparams = "-ksp_type preonly -pc_type sor -pc_sor_symmetric");
+
+// --- Dirichlet (penalty-row) mask -----------------------------------------
+real[int] mask(nE);
+{
+  complex[int] d = Aloc.diag;
+  int nm = 0;
+  for (int i = 0; i < nE; i++) { mask[i] = (abs(d[i]) > 1e20) ? 0.0 : 1.0; if (mask[i] == 0) nm++; }
+  cout << "PENALTY_ROWS " << nm << endl;
+}
+complex[int] maskC(nE);
+for (int i = 0; i < nE; i++) maskC[i] = mask[i];
+
+// --- gradient term (exact) ------------------------------------------------
+matrix G;
+MatrixEdgeP1(G, Th);
+varf vMgrad(p, q) = int3d(Th)( -(k0 * k0) * (dx(p) * dx(q) + dy(p) * dy(q) + dz(p) * dz(q)) )
+                  + on(1, 2, 3, 4, 5, 6, p = 0);
+matrix<complex> Mgrad = vMgrad(Ph, Ph);
+set(Mgrad, solver = sparsesolver);
+
+// --- Pi: P1^3 (interleaved by node) -> Edge03d, from G's topology (as hx_precon.idp)
+int nN = G.m;
+int[int] eTail(G.n), eHead(G.n);
+{
+  int[int] I, J; real[int] C;
+  [I, J, C] = G;
+  for (int t = 0; t < I.n; t++) {
+    if (I[t] >= G.n || J[t] >= nN) continue;   // MatrixEdgeP1 padding entry
+    if (C[t] < 0) eTail[I[t]] = J[t]; else eHead[I[t]] = J[t];
+  }
+}
+Ph X = x, Y = y, Z = z;
+matrix<complex> Pi, Pm;
+{
+  int[int] I(6 * nE + 1), J(6 * nE + 1);
+  complex[int] V(6 * nE + 1), Vm(6 * nE + 1);
+  int t = 0;
+  for (int e = 0; e < nE; e++) {
+    int a = eTail[e], b = eHead[e];
+    real d0 = X[][b] - X[][a], d1 = Y[][b] - Y[][a], d2 = Z[][b] - Z[][a];
+    real[int] dd = [d0, d1, d2];
+    for (int c = 0; c < 3; c++) {
+      I[t] = e; J[t] = 3 * a + c; V[t] = dd[c] / 2.0; Vm[t] = mask[e] * dd[c] / 2.0; t++;
+      I[t] = e; J[t] = 3 * b + c; V[t] = dd[c] / 2.0; Vm[t] = mask[e] * dd[c] / 2.0; t++;
+    }
+  }
+  I[t] = 0; J[t] = 3 * nN - 1; V[t] = 0.0; Vm[t] = 0.0;
+  Pi = [I, J, V];
+  Pm = [I, J, Vm];
+}
+// Check: Pi reproduces constant fields exactly (a P1^3 constant -> its circulation).
+{
+  complex[int] u(3 * nN), e1(nE);
+  for (int n = 0; n < nN; n++) { u[3*n] = 1.0; u[3*n+1] = 2.0; u[3*n+2] = 3.0; }
+  e1 = Pi * u;
+  // the same field through the Edge03d interpolation
+  Eh [ux, uy, uz] = [1.0, 2.0, 3.0];
+  real err = 0;
+  for (int e = 0; e < nE; e++) err = max(err, abs(e1[e] - ux[][e]));
+  cout << "PI_CHECK max|Pi*const - interp(const)| = " << err << endl;
+}
+
+// PEC nodes (on a PEC boundary triangle)
+int[int] bndNode(nN);
+bndNode = 0;
+for (int k = 0; k < Th.nbe; k++)
+  if (Th.be(k).label >= 1 && Th.be(k).label <= 6)
+    for (int v = 0; v < 3; v++) bndNode[Th.be(k)[v]] = 1;
+
+// Galerkin product, then either PEC-node elimination (elim = 1) or identity on
+// zero rows (elim = 0, for the masked Pm: nodes touching only PEC edges)
+macro buildMvec(OUT, P, OP, elim)
+matrix<complex> OUT;
+{
+  matrix<complex> tmpAP = OP * P;
+  matrix<complex> tmpM = P' * tmpAP;
+  int[int] I, J; complex[int] C;
+  [I, J, C] = tmpM;
+  complex[int] dg = tmpM.diag;
+  int nAdd = 0;
+  for (int i = 0; i < 3 * nN; i++)
+    if ((elim && bndNode[i / 3]) || (!elim && abs(dg[i]) < 1e-14)) nAdd++;
+  int[int] I2(I.n + nAdd), J2(I.n + nAdd); complex[int] C2(I.n + nAdd);
+  for (int t = 0; t < I.n; t++) {
+    I2[t] = I[t]; J2[t] = J[t];
+    C2[t] = (elim && (bndNode[I[t] / 3] || bndNode[J[t] / 3])) ? 0.0 : C[t];
+  }
+  int t = I.n;
+  for (int i = 0; i < 3 * nN; i++)
+    if ((elim && bndNode[i / 3]) || (!elim && abs(dg[i]) < 1e-14)) { I2[t] = i; J2[t] = i; C2[t] = 1.0; t++; }
+  OUT = [I2, J2, C2];
+  cout << "MVEC added identity rows " << nAdd << endl;
+}// EOM
+
+buildMvec(Mv1, Pi, Aloc, 1)
+buildMvec(Mv2, Pi, ApLoc, 1)
+buildMvec(Mv3, Pm, Aloc, 0)
+buildMvec(Mv4, Pm, ApLoc, 0)
+// GAMG copies of Mv1, Mv2 (vec 5, 6): built before the exact factorizations
+matrix<complex> Mv1raw = Mv1, Mv2raw = Mv2;
+set(Mv1, solver = sparsesolver);
+set(Mv2, solver = sparsesolver);
+set(Mv3, solver = sparsesolver);
+set(Mv4, solver = sparsesolver);
+
+// Inexact inner solves as in ../hx_precon.idp (GMRES + GAMG, rtol 1e-2, <= 20 its).
+// def/init must be defined only here, after every scalar MatCreate (see ../hx_precon.idp).
+string innerOpts = getARGV("-inner", "-ksp_type gmres -pc_type gamg -ksp_rtol 1e-2 -ksp_max_it 20");
+macro def(i)[i, i#B, i#C]// EOM
+macro init(i)[i, i, i]// EOM
+func PkV = [P1, P1, P1];
+Mat<complex> MvG1, MvG2;
+MatCreate(Th, MvG1, PkV);
+MvG1 = Mv1raw;
+set(MvG1, sparams = innerOpts, bs = 3);
+MatCreate(Th, MvG2, PkV);
+MvG2 = Mv2raw;
+set(MvG2, sparams = innerOpts, bs = 3);
+
+int smType = 0, vecVar = 0;
+int dbgCalls = 0;   // > 0: print the sizes of the terms for that many precon calls
+int dbgArg = getARGV("-dbg", 0);
+
+func complex[int] matvec(complex[int] & v) {
+  complex[int] y = Aloc * v;
+  return y;
+}
+
+func complex[int] precon(complex[int] & r) {
+  complex[int] z(r.n);
+  if (smType == 0) z = diagInv .* r;
+  else z = A^-1 * r;
+
+  complex[int] rm = maskC .* r;
+  complex[int] rn = G' * rm;
+  complex[int] pn = Mgrad^-1 * rn;
+  complex[int] gc = G * pn;
+  gc = maskC .* gc;
+  z += gc;
+
+  if (vecVar == 1 || vecVar == 2 || vecVar >= 5) {
+    complex[int] rv = Pi' * r;
+    for (int n = 0; n < nN; n++) if (bndNode[n]) { rv[3*n] = 0; rv[3*n+1] = 0; rv[3*n+2] = 0; }
+    complex[int] u(rv.n);
+    if (vecVar == 1) u = Mv1^-1 * rv;
+    else if (vecVar == 2) u = Mv2^-1 * rv;
+    else if (vecVar == 5 || vecVar == 7) u = MvG1^-1 * rv;
+    else u = MvG2^-1 * rv;
+    complex[int] vc = Pi * u;
+    if (vecVar >= 7) vc = maskC .* vc;
+    if (dbgCalls > 0) {
+      complex[int] az = Aloc * z, avc = Aloc * vc;
+      cout << "DBG vec=" << vecVar << " |r| " << r.l2 << " |rv| " << rv.l2 << " |u| " << u.l2
+           << " |z0| " << z.l2 << " |vc| " << vc.l2 << " |A z0| " << az.l2 << " |A vc| " << avc.l2 << endl;
+      dbgCalls--;
+    }
+    z += vc;
+  } else if (vecVar == 3 || vecVar == 4) {
+    complex[int] rv = Pm' * r;
+    complex[int] u(rv.n);
+    if (vecVar == 3) u = Mv3^-1 * rv; else u = Mv4^-1 * rv;
+    complex[int] vc = Pm * u;
+    z += vc;
+  }
+  return z;
+}
+
+// --- right-hand sides -------------------------------------------------------
+Ph pTrue = sin(pi * x) * sin(pi * y) * sin(pi * z);
+complex[int] pC(Ph.ndof);
+for (int i = 0; i < Ph.ndof; i++) pC[i] = pTrue[][i];
+complex[int] eGrad = G * pC;
+complex[int] bA = Aloc * eGrad;
+func real src(real xx, real yy, real zz) {
+  real rx = (xx - 0.5) / 0.15, ry = (yy - 0.5) / 0.15, rz = (zz - 0.5) / 0.15;
+  return exp(-(rx * rx + ry * ry + rz * rz));
+}
+varf vRhs([Ex, Ey, Ez], [Vx, Vy, Vz]) = int3d(Th)(src(x, y, z) * Vx) + on(1, 2, 3, 4, 5, 6, Ex = 0, Ey = 0, Ez = 0);
+complex[int] bB = vRhs(0, Eh);
+
+// Inner-solve check: one auxiliary solve with the GAMG Mats against the exact ones.
+{
+  complex[int] rv = Pi' * bB;
+  for (int n = 0; n < nN; n++) if (bndNode[n]) { rv[3*n] = 0; rv[3*n+1] = 0; rv[3*n+2] = 0; }
+  complex[int] ue1 = Mv1^-1 * rv, ue2 = Mv2^-1 * rv;
+  complex[int] ug1 = MvG1^-1 * rv, ug2 = MvG2^-1 * rv;
+  complex[int] r1 = Mv1raw * ug1, r2 = Mv2raw * ug2;
+  r1 -= rv; r2 -= rv;
+  complex[int] d1 = ug1 - ue1, d2 = ug2 - ue2;
+  cout << "INNER_CHECK A : resid " << r1.l2 / rv.l2 << " err " << d1.l2 / ue1.l2
+       << " |u_gamg|/|u_exact| " << ug1.l2 / ue1.l2 << endl;
+  cout << "INNER_CHECK A+: resid " << r2.l2 / rv.l2 << " err " << d2.l2 / ue2.l2
+       << " |u_gamg|/|u_exact| " << ug2.l2 / ue2.l2 << endl;
+}
+
+int[int] cfgSm  = [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+int[int] cfgVec = [0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 1, 2, 3, 4, 5, 6, 7, 8];
+for (int rhs = 0; rhs < 2; rhs++) {
+  for (int c = 0; c < cfgSm.n; c++) {
+    smType = cfgSm[c];
+    vecVar = cfgVec[c];
+    dbgCalls = (rhs == 1) ? dbgArg : 0;
+    int gmresN = nE;
+    complex[int] gmresB(nE);
+    if (rhs == 0) gmresB = bA; else gmresB = bB;
+    complex[int] gmresX(nE);
+    gmresX = 0.0;
+    real gmresRtol = 1e-8;
+    int gmresMaxIt = maxIt;
+    int gmresRestart = 30;
+    int gmresIterCount = 0;
+    real gmresRelRes = 1.0;
+    int gmresConverged = 0;
+    include "../gmres_precon.idp"
+    complex[int] rr = Aloc * gmresX;
+    rr -= gmresB;
+    cout << "RESULT " << (rhs == 0 ? "A" : "B") << " sm=" << smType << " vec=" << vecVar
+         << " it=" << gmresIterCount << " relres=" << gmresRelRes
+         << " true=" << (rr.l2 / gmresB.l2) << " conv=" << gmresConverged << endl;
+  }
+}

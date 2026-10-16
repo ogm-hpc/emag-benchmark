@@ -1,0 +1,195 @@
+// PCB-benchmark fork of ../maxwell_common.idp (2026-09-28, PCB_SOLVER_VERSION 0.1).
+// Material coefficients, anisotropic UPML tensors, integrand macros and the
+// system bilinear forms for maxwell_pcb_solver.edp. Requires (caller):
+// runtime_case_config.idp and pcb_case_config.idp included, mesh3 Th,
+// fespace Eh(Th, Edge03d).
+//
+// Differences from maxwell_common.idp (see pcb_problem_benchmark_settings.md 7.4):
+//  * PCB substrate regions labSubstrate, labSubstrate2..4 with epsSubstrate*,
+//    tanDeltaSubstrate* (pcb_case_config.idp; label -1 = unused, as for the
+//    existing cases).
+//  * Volume conductor region labConductor, eps_r = 1 - i*condRel (settings 5.5 stage 4).
+//  * Every tangential surface term goes through surfCoef(label), the single
+//    extension point for the lumped-port (portLabel1..16) and SIBC
+//    (sibcLabel1..4) terms (3.3 / 3.4 of the settings), so that aMaxwell, aMaxwellShift
+//    and the HX gradient auxiliary
+//    problem (pcb_hx_precon.idp / pcb_cslp_hx_precon.idp) always carry the
+//    same boundary terms. With only the Silver-Mueller term active, the
+//    assembled matrices are identical to maxwell_common.idp's (regression
+//    check, 7.5).
+//
+// Time convention: exp(+i*omega*t) -- outgoing waves ~ exp(-i*k*r), lossy media
+// eps = eps'*(1 - i*tan(delta)), Silver-Mueller term +i*k0*E_t.V_t.
+
+// ---------------------------------------------------------------------------
+// Coefficients
+// ---------------------------------------------------------------------------
+func real epsrRegion(int r) {
+  real v = 1.0;
+  if (r == labSphereDielectric) v = epsSphere;
+  if (r == labLayer2) v = kappa;
+  if (r == labPTFE) v = epsPTFE;
+  if (r == labAlumina) v = epsAlumina;
+  if (r == labEps100) v = 100.0;
+  if (r == labEps1) v = 1.0;
+  if (r == labRodsHighEps) v = epsRods;
+  if (r == labLossy) v = epsLossy;
+  if (r == labLossyMaterial) v = epsLossy;
+  if (r == labHighK) v = kappa;
+  if (r == labSubstrate) v = epsSubstrate;     // PCB substrate (pcb_case_config.idp)
+  if (r == labSubstrate2) v = epsSubstrate2;   // further dielectric regions (P04, solder resist)
+  if (r == labSubstrate3) v = epsSubstrate3;
+  if (r == labSubstrate4) v = epsSubstrate4;
+  return v;
+}
+func real lossRegion(int r) {
+  real td = 0.0;
+  if (r == labLossyMaterial) td = tanDelta;
+  if (r == labLossy) td = tanDelta;
+  if (r == labSubstrate) td = tanDeltaSubstrate;
+  if (r == labSubstrate2) td = tanDeltaSubstrate2;
+  if (r == labSubstrate3) td = tanDeltaSubstrate3;
+  if (r == labSubstrate4) td = tanDeltaSubstrate4;
+  return td;
+}
+
+// Volume conductor (settings 5.5 stage 4): relative permittivity
+// 1 - i*sigma/(omega*eps0) in the region labConductor (condRel = sigma/(omega*eps0)
+// from pcb_case_config.idp, computed by the runner for the solve frequency;
+// label -1 = unused, contributes exactly 0).
+func real condRegion(int r) {
+  real c = 0.0;
+  if (r == labConductor) c = condRel;
+  return c;
+}
+
+// Material permittivity, piecewise constant per region (P0).
+fespace Ph0(Th, P0);
+Ph0<complex> epsC = epsrRegion(region) * (1.0 - 1i * lossRegion(region)) - 1i * condRegion(region);
+
+// Anisotropic UPML (stretched coordinates) outside the core box
+// [pmlXmin,pmlXmax]x[pmlYmin,pmlYmax]x[pmlZmin,pmlZmax]:
+// s_q = 1 - i*sigma_q/k0, sigma_q = pmlSigmaMax*(d_q/pmlThick)^2,
+// eps~ = eps*Lambda, mu~ = Lambda, Lambda = diag(sy*sz/sx, sx*sz/sy, sx*sy/sz).
+fespace Ph1(Th, P1);
+Ph1<complex> pmlSx = 1.0, pmlSy = 1.0, pmlSz = 1.0;
+if (usePML) {
+  real sk = pmlSigmaMax / k0;
+  real ti = 1.0 / pmlThick;
+  pmlSx = 1.0 - 1i * sk * square((max(x - pmlXmax, 0.0) + max(pmlXmin - x, 0.0)) * ti);
+  pmlSy = 1.0 - 1i * sk * square((max(y - pmlYmax, 0.0) + max(pmlYmin - y, 0.0)) * ti);
+  pmlSz = 1.0 - 1i * sk * square((max(z - pmlZmax, 0.0) + max(pmlZmin - z, 0.0)) * ti);
+}
+Ph1<complex> lamX = pmlSy * pmlSz / pmlSx;   // mass-term tensor (times eps)
+Ph1<complex> lamY = pmlSx * pmlSz / pmlSy;
+Ph1<complex> lamZ = pmlSx * pmlSy / pmlSz;
+Ph1<complex> ilamX = pmlSx / (pmlSy * pmlSz); // curl-term tensor (mu~^-1)
+Ph1<complex> ilamY = pmlSy / (pmlSx * pmlSz);
+Ph1<complex> ilamZ = pmlSz / (pmlSx * pmlSy);
+
+macro dot3(a1,a2,a3,b1,b2,b3) ((a1)*(b1) + (a2)*(b2) + (a3)*(b3)) //
+macro ndot(u1,u2,u3) (N.x*(u1) + N.y*(u2) + N.z*(u3)) //
+macro tangDot(u1,u2,u3,v1,v2,v3) (
+  ((u1)-N.x*ndot(u1,u2,u3))*((v1)-N.x*ndot(v1,v2,v3))
++ ((u2)-N.y*ndot(u1,u2,u3))*((v2)-N.y*ndot(v1,v2,v3))
++ ((u3)-N.z*ndot(u1,u2,u3))*((v3)-N.z*ndot(v1,v2,v3))
+) //
+// (mu~^-1 curl E) . curl V
+macro curlTerm(Ex,Ey,Ez,Vx,Vy,Vz) (
+  ilamX * (dy(Ez) - dz(Ey)) * (dy(Vz) - dz(Vy))
++ ilamY * (dz(Ex) - dx(Ez)) * (dz(Vx) - dx(Vz))
++ ilamZ * (dx(Ey) - dy(Ex)) * (dx(Vy) - dy(Vx))
+) //
+// (eps~ E) . V
+macro massTerm(Ex,Ey,Ez,Vx,Vy,Vz) (
+  epsC * (lamX * (Ex) * (Vx) + lamY * (Ey) * (Vy) + lamZ * (Ez) * (Vz))
+) //
+// grad-restricted form, used by the HX gradient correction: A(grad p, grad q)
+macro gradTerm(p,q) (
+  epsC * (lamX * dx(p) * dx(q) + lamY * dy(p) * dy(q) + lamZ * dz(p) * dz(q))
+) //
+
+// Boundary labels on which the Silver-Mueller term is active.
+macro isSMLabel(lb) ((lb == smLabel1) + (lb == smLabel2) + (lb == smLabel3) + (lb == smLabel4)) //
+
+// Lumped ports (settings 3.3): resistive sheet Z_p = R_p*w_p/h_p [Ohm] on the
+// port face, term i*k0*eta0/Z_p (portLabel1..16 and portZs1..16 from
+// pcb_case_config.idp; label -1 = unused slot, contributes exactly 0).
+real eta0 = 376.730313668;   // free-space wave impedance [Ohm]
+complex portC1 = 1i * k0 * eta0 / portZs1;
+complex portC2 = 1i * k0 * eta0 / portZs2;
+complex portC3 = 1i * k0 * eta0 / portZs3;
+complex portC4 = 1i * k0 * eta0 / portZs4;
+complex portC5 = 1i * k0 * eta0 / portZs5;
+complex portC6 = 1i * k0 * eta0 / portZs6;
+complex portC7 = 1i * k0 * eta0 / portZs7;
+complex portC8 = 1i * k0 * eta0 / portZs8;
+complex portC9 = 1i * k0 * eta0 / portZs9;
+complex portC10 = 1i * k0 * eta0 / portZs10;
+complex portC11 = 1i * k0 * eta0 / portZs11;
+complex portC12 = 1i * k0 * eta0 / portZs12;
+complex portC13 = 1i * k0 * eta0 / portZs13;
+complex portC14 = 1i * k0 * eta0 / portZs14;
+complex portC15 = 1i * k0 * eta0 / portZs15;
+complex portC16 = 1i * k0 * eta0 / portZs16;
+macro portSurfCoef(lb) ((lb == portLabel1) * portC1 + (lb == portLabel2) * portC2
+                      + (lb == portLabel3) * portC3 + (lb == portLabel4) * portC4
+                      + (lb == portLabel5) * portC5 + (lb == portLabel6) * portC6
+                      + (lb == portLabel7) * portC7 + (lb == portLabel8) * portC8
+                      + (lb == portLabel9) * portC9 + (lb == portLabel10) * portC10
+                      + (lb == portLabel11) * portC11 + (lb == portLabel12) * portC12
+                      + (lb == portLabel13) * portC13 + (lb == portLabel14) * portC14
+                      + (lb == portLabel15) * portC15 + (lb == portLabel16) * portC16) //
+
+// Surface impedance boundary (settings 3.4, Leontovich): term
+// n_f * i*k0*eta0/Z_s on the conductor faces sibcLabel1..4, Z_s = (1+i)/(sigma*delta)
+// [Ohm] (sibcZsRe, sibcZsIm from pcb_case_config.idp, computed by the runner
+// for the solve frequency). n_f = sibcFactor1..4: conductor surfaces the face
+// stands for (1 on the outer boundary, 2 for a zero-thickness sheet with
+// current on both sides). These faces are not PEC (not in pecLabel1..8).
+// Label -1 = unused slot, contributes exactly 0.
+complex sibcC = 1i * k0 * eta0 / (sibcZsRe + 1i * sibcZsIm);
+macro sibcSurfCoef(lb) (((lb == sibcLabel1) * sibcFactor1 + (lb == sibcLabel2) * sibcFactor2
+                       + (lb == sibcLabel3) * sibcFactor3 + (lb == sibcLabel4) * sibcFactor4) * sibcC) //
+
+// Coefficient c(label) of the tangential surface term c * int E_t.V_t.
+// Silver-Mueller: i*k0. Lumped ports: i*k0*eta0/Z_p. SIBC: n_f*i*k0*eta0/Z_s.
+macro surfCoef(lb) (useSM * isSMLabel(lb) * 1i * k0 + portSurfCoef(lb) + sibcSurfCoef(lb)) //
+
+// PEC (tangential E = 0) is imposed strongly via on().
+varf aMaxwell([Ex, Ey, Ez], [Vx, Vy, Vz]) =
+    int3d(Th)(
+        curlTerm(Ex, Ey, Ez, Vx, Vy, Vz)
+      - (k0 * k0) * massTerm(Ex, Ey, Ez, Vx, Vy, Vz)
+    )
+  + int2d(Th)(
+        surfCoef(label) * tangDot(Ex, Ey, Ez, Vx, Vy, Vz)
+    )
+  + on(pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+       pecLabel5, pecLabel6, pecLabel7, pecLabel8,
+       Ex = 0, Ey = 0, Ez = 0);
+
+// CSLP-shifted operator: the -k0^2 term multiplied by (beta1 - i*beta2).
+varf aMaxwellShift([Ex, Ey, Ez], [Vx, Vy, Vz]) =
+    int3d(Th)(
+        curlTerm(Ex, Ey, Ez, Vx, Vy, Vz)
+      - (k0 * k0) * (cslpBeta1 - 1i * cslpBeta2) * massTerm(Ex, Ey, Ez, Vx, Vy, Vz)
+    )
+  + int2d(Th)(
+        surfCoef(label) * tangDot(Ex, Ey, Ez, Vx, Vy, Vz)
+    )
+  + on(pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+       pecLabel5, pecLabel6, pecLabel7, pecLabel8,
+       Ex = 0, Ey = 0, Ez = 0);
+
+// HX gradient auxiliary problem, A(grad p, grad q) = G^T A G.
+// p = 0 on the conductors: on PEC faces as in A; on SIBC faces the auxiliary
+// space is restricted to gradients vanishing there (Galerkin on that subspace,
+// the PEC form in the limit Z_s -> 0). Without it, a model whose conductors are
+// all SIBC (no PEC label) leaves the constant p in the kernel of G^T A G.
+varf aMaxwellGrad(p, q) =
+    int3d(Th)( -(k0 * k0) * gradTerm(p, q) )
+  + int2d(Th)( surfCoef(label) * tangDot(dx(p), dy(p), dz(p), dx(q), dy(q), dz(q)) )
+  + on(pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+       pecLabel5, pecLabel6, pecLabel7, pecLabel8,
+       sibcLabel1, sibcLabel2, sibcLabel3, sibcLabel4, p = 0);

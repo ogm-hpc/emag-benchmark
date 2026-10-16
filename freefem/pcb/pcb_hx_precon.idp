@@ -1,0 +1,90 @@
+// PCB-benchmark fork of ../hx_precon.idp (2026-09-28, PCB_SOLVER_VERSION 0.1).
+// HX auxiliary-space preconditioner, 2-term form:
+//   hxPrecon(r) = omega*D_A^-1*r + G*(Mgrad^-1*(G^T*r))
+// Mgrad = G^T A G is assembled from pcb_common.idp's aMaxwellGrad, so it carries
+// the same surface terms (Silver-Mueller, and later lumped ports / SIBC) as A.
+// The disabled 3rd (Pi / vector-Laplacian) term of hx_precon.idp is not
+// forked; debug it there.
+//
+// Include-style block. Caller-defined globals: mesh3 Th, matrix<complex> Aloc,
+// string petscOptions, real hxSmootherOmega, varf aMaxwellGrad,
+// int hxDirichletMask (pcb_case_config.idp).
+// On return: func complex[int] hxPrecon(complex[int] & r).
+
+load "mat_edgeP1"
+
+// omega * D_A^-1 as a vector (Aloc.diag; zero pivots floored).
+complex[int] hxSmoothInv = Aloc.diag;
+{
+  real hxPivotFloor = 1.0e-12;
+  for (int i = 0; i < hxSmoothInv.n; i++)
+    if (abs(hxSmoothInv[i]) < hxPivotFloor) hxSmoothInv[i] = hxPivotFloor;
+  complex[int] hxOne(hxSmoothInv.n);
+  hxOne = hxSmootherOmega;
+  hxOne ./= hxSmoothInv;
+  hxSmoothInv = hxOne;
+}
+
+// Dirichlet mask (hxDirichletMask = 1, pcb_case_config.idp; PCB standard of
+// run_pcb_benchmark.py run since handoff task I-9, settings 8.2): PEC is
+// imposed by on() as a penalty (diagonal tgv = 1e30, off-
+// diagonals kept). On a PEC edge, G*p carries the ~1e-30 values of p on the
+// Dirichlet nodes, which A multiplies back to O(|r|): the PEC rows of A*M^-1
+// get a spurious term the smoother (omega/tgv there) cannot correct. With the
+// mask, r is zeroed on the penalty rows before G^T and G*p after, i.e. the HX
+// correction of the constrained space. 0 (regress, --no-hx-mask) keeps the fork
+// identical to ../hx_precon.idp (regression, 7.5).
+complex[int] hxMask(Aloc.n);
+hxMask = 1.0;
+if (hxDirichletMask) {
+  complex[int] hxDiag = Aloc.diag;
+  int nMasked = 0;
+  for (int i = 0; i < hxMask.n; i++)
+    if (abs(hxDiag[i]) > 1.0e20) { hxMask[i] = 0.0; nMasked++; }
+  cout << "HX_DIRICHLET_MASK rows " << nMasked << " of " << hxMask.n << endl;
+}
+
+matrix hxGLoc;
+MatrixEdgeP1(hxGLoc, Th);
+
+func PkHxNode = P1;
+fespace HxPh(Th, PkHxNode);
+
+Mat<complex> hxMgrad;
+MatCreate(Th, hxMgrad, PkHxNode);
+hxMgrad = aMaxwellGrad(HxPh, HxPh);
+set(hxMgrad, sparams = petscOptions);
+
+// Optional (docs/paper_plan.md A1, PCB_SOLVER_VERSION 0.9; defaults keep the
+// 2-term form): hxSmoother = 1 replaces the Jacobi smoother by one symmetric
+// Gauss-Seidel (PETSc SOR) sweep; hxVecTerm > 0 adds the vector (Pi) correction
+// of pcb_hx_vec.idp.
+matrix<complex> hxVecShift;
+include "pcb_hx_vec.idp"
+matrix<complex> hxSgsSrc = [[1.0]];
+if (hxSmoother == 1) hxSgsSrc = Aloc;
+Mat<complex> hxSgs(hxSgsSrc);
+set(hxSgs, sparams = "-ksp_type preonly -pc_type sor -pc_sor_symmetric");
+
+func complex[int] hxPrecon(complex[int] & r) {
+  complex[int] smoothed(r.n);
+  if (hxSmoother == 1) smoothed = hxSgs^-1 * r;
+  else smoothed = hxSmoothInv .* r;
+
+  complex[int] rm(r.n);
+  rm = r;
+  if (hxDirichletMask) rm = hxMask .* r;
+  complex[int] rNode = hxGLoc' * rm;
+  complex[int] pNode = hxMgrad^-1 * rNode;
+  complex[int] gradCorrection = hxGLoc * pNode;
+  if (hxDirichletMask) gradCorrection = hxMask .* gradCorrection;
+
+  complex[int] z(r.n);
+  z = smoothed;
+  z += gradCorrection;
+  if (hxVecTerm > 0) {
+    complex[int] vc = hxVecCorr(r);
+    z += vc;
+  }
+  return z;
+}

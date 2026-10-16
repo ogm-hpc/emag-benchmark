@@ -1,0 +1,381 @@
+// Edge03d Maxwell solver for the PCB benchmark (pcb_problem_benchmark_settings.md).
+// Forked 2026-09-28 from ../maxwell_edge03d_solver.edp so that PCB features
+// (lumped ports, S-parameters, SIBC, mode ports) can be added without touching
+// the high-frequency benchmark's solver (settings 7.4). Shared, unmodified:
+// gmres_precon.idp, cocg_precon.idp, accel_ic_petsc.idp (copied next to this
+// file into the job directory by run_pcb_benchmark.py).
+//
+// Expects runtime_case_config.idp (same format as the existing benchmark's,
+// written by run_freefem_batch.build_runtime_config) and pcb_case_config.idp
+// (PCB-only settings, see run_pcb_benchmark.py).
+//
+// With the PCB-only settings at their defaults (x-polarized source, no ports),
+// this solver reproduces maxwell_edge03d_solver.edp (regression check, 7.5).
+//
+// Time convention: exp(+i*omega*t) -- outgoing waves ~ exp(-i*k*r),
+// lossy media eps = eps'*(1 - i*tan(delta)), Silver-Mueller term +i*k0*E_t.V_t.
+
+load "msh3"
+load "gmsh"
+load "PETSc-complex"     // complex-valued matrix/RHS require the complex PETSc plugin
+load "Element_Mixte3d"   // Edge03ds0 partition-of-unity element needed by MatCreate()
+macro dimension()3// EOM
+include "macro_ddm.idp"
+
+include "runtime_case_config.idp"
+include "pcb_case_config.idp"
+
+string pcbSolverVersion = "1.0";    // 0.2: lumped ports (E2), S-parameters; 0.3: SIBC;
+                                   // 0.4: 16 port slots, 4 dielectric regions;
+                                   // 0.5: multiple right-hand sides (mrhsMethod);
+                                   // 0.6: solution save / error check (solution_check.idp);
+                                   // 0.7: volume conductor region (labConductor)
+                                   // 0.8: Ritz probe (ritzSteps, pcb_ritz_probe.idp)
+                                   // 0.9: optional HX vector term / SGS smoother (hxVecTerm,
+                                   //      hxSmoother, pcb_hx_vec.idp; off by default)
+                                   // 0.10: hx/gmres standard = vector term 2 + SGS (set by
+                                   //      run_pcb_benchmark.py HX_STANDARD; defaults here unchanged)
+                                   // 0.11: node-patch preconditioner (outerMethod npatch,
+                                   //      npatchType, pcb_npatch_precon.idp)
+                                   // 1.0: frozen for the v1.0 records (docs/paper_plan.md A5,
+                                   //      2026-10-05); no change from 0.11
+
+real tStart = clock();
+cout << "PCB_SOLVER_VERSION = " << pcbSolverVersion << endl;
+cout << "==========================================" << endl;
+cout << "Edge03d Maxwell solve (PCB)" << endl;
+cout << "case = " << caseName << ", param = " << paramSetName << endl;
+cout << "mesh = " << meshFile << endl;
+cout << "outerMethod = " << outerMethod << ", krylov = " << krylovMethod << endl;
+cout << "usePML = " << usePML << ", useSM = " << useSM << endl;
+cout << "excitation = " << excitation << ", srcDir = (" << srcDirX << ", " << srcDirY << ", " << srcDirZ << ")" << endl;
+cout << "nPorts = " << nPorts << ", excitedPort = " << excitedPort << endl;
+cout << "SIBC labels = " << sibcLabel1 << " " << sibcLabel2 << " " << sibcLabel3 << " " << sibcLabel4
+     << ", Zs = " << sibcZsRe << " + i " << sibcZsIm << " Ohm" << endl;
+cout << "Conductor label = " << labConductor << ", sigma = " << condSigma
+     << " S/m, sigma/(omega eps0) = " << condRel << endl;
+cout << "==========================================" << endl;
+
+mesh3 Th = gmshload3(meshFile);
+
+// MatCreate needs the element TYPE alias, not a bound fespace instance.
+func Pk = Edge03d;
+fespace Eh(Th, Pk);
+cout << "NDOF = " << Eh.ndof << endl;
+
+int[int] n2o;
+macro ThN2O()n2o// EOM
+DmeshCreate(Th);
+
+// Coefficients, integrand macros, surface-term extension point (surfCoef) and
+// the bilinear forms aMaxwell / aMaxwellShift / aMaxwellGrad.
+include "pcb_common.idp"
+
+// E1 excitation: Gaussian volume source with polarization (srcDirX, srcDirY,
+// srcDirZ), evaluated exactly at quadrature points.
+real srcWidthInv = 1.0 / max(srcWidth, 1.0e-8);
+varf lRhs([Ex, Ey, Ez], [Vx, Vy, Vz]) =
+    int3d(Th)( srcAmp * exp(-(square((x - srcX0) * srcWidthInv) + square((y - srcY0) * srcWidthInv)
+                              + square((z - srcZ0) * srcWidthInv)))
+               * (srcDirX * Vx + srcDirY * Vy + srcDirZ * Vz) )
+  + on(pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+       pecLabel5, pecLabel6, pecLabel7, pecLabel8,
+       Ex = 0, Ey = 0, Ez = 0);
+
+// E2 excitation: lumped-port Norton current (pcb_port.idp; resistors of all
+// ports are in the matrix through surfCoef).
+include "pcb_port.idp"
+// Multiple right-hand sides (all ports, mrhsMethod != ""): runMrhs / runMrhsKsp.
+include "pcb_mrhs.idp"
+if (mrhsMethod != "" && excitation != "E2") {
+  cout << "ERROR: mrhsMethod needs the E2 excitation" << endl;
+  exit(1);
+}
+if (mrhsMethod != "" && (solSaveFile != "" || solRefFile != "")) {
+  cout << "ERROR: solution save / error check (solSaveFile, solRefFile) needs a single right-hand side" << endl;
+  exit(1);
+}
+
+if (ritzSteps > 0 && (mrhsMethod != "" || outerMethod == "petsc")) {
+  // the PETSc KSP branch has no precon(); run_pcb_benchmark.py ritz probes
+  // PETSc preconditioners through the pc_cocg branch ("-ksp_type preonly")
+  cout << "ERROR: the Ritz probe needs a hand-rolled branch (not petsc) and a single right-hand side" << endl;
+  exit(1);
+}
+
+complex[int] b(Eh.ndof);
+if (excitation == "E2") {
+  if (excitedPort < 1 || excitedPort > nPorts) {
+    cout << "ERROR: E2 excitation needs 1 <= excitedPort <= nPorts" << endl;
+    exit(1);
+  }
+  b = lPort(0, Eh);
+} else {
+  b = lRhs(0, Eh);
+}
+cout << "RHS_NORM = " << b.l2 << endl;
+Eh<complex> [Esolx, Esoly, Esolz];
+cout << "PHASE coefficients_rhs " << (clock() - tStart) << endl;
+
+// Hand-rolled outer drivers (shared gmres_precon.idp / cocg_precon.idp).
+macro runGmres()
+  int gmresN = Eh.ndof;
+  complex[int] gmresB(Eh.ndof);
+  gmresB = b;
+  complex[int] gmresX(Eh.ndof);
+  gmresX = 0.0;
+  real gmresRtol = outerRtol;
+  int gmresMaxIt = outerMaxIt;
+  int gmresRestart = gmresRestartCfg;
+  int gmresIterCount = 0;
+  real gmresRelRes = 1.0;
+  int gmresConverged = 0;
+  cout << "PHASE setup_done " << (clock() - tStart) << endl;
+  real tSolve0 = clock();
+  include "gmres_precon.idp"
+  cout << "SOLVE_TIME = " << (clock() - tSolve0) << endl;
+  if (gmresConverged)
+    cout << "Linear solve converged due to CONVERGED_RTOL iterations " << gmresIterCount << endl;
+  else
+    cout << "Linear solve did not converge due to DIVERGED_ITS iterations " << gmresIterCount << endl;
+  Esolx[] = gmresX;
+// EOM
+macro runCocg()
+  int cocgN = Eh.ndof;
+  complex[int] cocgB(Eh.ndof);
+  cocgB = b;
+  complex[int] cocgX(Eh.ndof);
+  cocgX = 0.0;
+  real cocgRtol = outerRtol;
+  int cocgMaxIt = outerMaxIt;
+  int cocgIterCount = 0;
+  real cocgRelRes = 1.0;
+  int cocgConverged = 0;
+  cout << "PHASE setup_done " << (clock() - tStart) << endl;
+  real tSolve0 = clock();
+  include "cocg_precon.idp"
+  cout << "SOLVE_TIME = " << (clock() - tSolve0) << endl;
+  if (cocgConverged)
+    cout << "Linear solve converged due to CONVERGED_RTOL iterations " << cocgIterCount << endl;
+  else
+    cout << "Linear solve did not converge due to DIVERGED_ITS iterations " << cocgIterCount << endl;
+  Esolx[] = cocgX;
+// EOM
+// Ritz probe (ritzSteps > 0, pcb_ritz_probe.idp): Arnoldi on A M^-1 with the
+// branch's matvec / precon, Hessenberg matrix to ritzFile, then exit (no solve).
+macro runRitz()
+  include "pcb_ritz_probe.idp"
+// EOM
+// COCG needs a FIXED, complex-symmetric preconditioner: allowed for cslp /
+// cslp_hx only with a "-ksp_type preonly" inner solve (presets cslp_mg /
+// cslp_hx_mg).
+macro runOuter()
+  if (ritzSteps > 0) {
+    runRitz
+  } else if (mrhsMethod != "") {
+    runMrhs
+  } else if (krylovMethod == "cocg") {
+    if (petscOptions.find("preonly") < 0) {
+      cout << "ERROR: COCG requires a fixed preconditioner (inner '-ksp_type preonly')" << endl;
+      exit(1);
+    }
+    runCocg
+  } else {
+    runGmres
+  }
+// EOM
+
+if (outerMethod == "cslp") {
+  // CSLP: A for mat-vecs, shifted operator P solved by PETSc (petscOptions).
+  matrix<complex> Aloc = aMaxwell(Eh, Eh);
+  Mat<complex> P;
+  {
+    macro ThPkPart()Edge03ds0// EOM
+    MatCreate(Th, P, Pk);
+  }
+  P = aMaxwellShift(Eh, Eh);
+  set(P, sparams = petscOptions);
+  cout << "PHASE assembly " << (clock() - tStart) << endl;
+
+  func complex[int] matvec(complex[int] & v) {
+    complex[int] y = Aloc * v;
+    return y;
+  }
+  func complex[int] precon(complex[int] & v) {
+    complex[int] z = P^-1 * v;
+    return z;
+  }
+  runOuter
+} else if (outerMethod == "accel_ic") {
+  // Accelerated IC(0), PETSc ICC(0) on A with diagonal scaled by alpha.
+  matrix<complex> Aloc = aMaxwell(Eh, Eh);
+  include "accel_ic_petsc.idp"
+  cout << "PHASE assembly " << (clock() - tStart) << endl;
+
+  func complex[int] matvec(complex[int] & v) {
+    complex[int] y = Aloc * v;
+    return y;
+  }
+  func complex[int] precon(complex[int] & v) {
+    complex[int] z = accelICPrecon(v);
+    return z;
+  }
+  if (ritzSteps > 0) {
+    runRitz
+  } else if (mrhsMethod != "") {
+    runMrhs
+  } else if (krylovMethod == "cocg") {
+    runCocg
+  } else {
+    runGmres
+  }
+} else if (outerMethod == "hx") {
+  // HX auxiliary-space preconditioner, 2-term form. GMRES only.
+  matrix<complex> Aloc = aMaxwell(Eh, Eh);
+  include "pcb_hx_precon.idp"
+  cout << "PHASE assembly " << (clock() - tStart) << endl;
+
+  func complex[int] matvec(complex[int] & v) {
+    complex[int] y = Aloc * v;
+    return y;
+  }
+  func complex[int] precon(complex[int] & v) {
+    complex[int] z = hxPrecon(v);
+    return z;
+  }
+  if (ritzSteps > 0) {
+    runRitz
+  } else if (mrhsMethod != "") {
+    runMrhs
+  } else {
+    runGmres
+  }
+} else if (outerMethod == "cslp_hx") {
+  // CSLP + HX gradient correction, 2-term form.
+  matrix<complex> Aloc = aMaxwell(Eh, Eh);
+  include "pcb_cslp_hx_precon.idp"
+  cout << "PHASE assembly " << (clock() - tStart) << endl;
+
+  func complex[int] matvec(complex[int] & v) {
+    complex[int] y = Aloc * v;
+    return y;
+  }
+  func complex[int] precon(complex[int] & v) {
+    complex[int] z = cslpHxPrecon(v);
+    return z;
+  }
+  runOuter
+} else if (outerMethod == "npatch") {
+  // Node-patch preconditioner (pcb_npatch_precon.idp; npatchType 0 asm, 1 ras,
+  // 2 sms from pcb_case_config.idp). GMRES or COCG (asm / sms are complex symmetric).
+  matrix<complex> Aloc = aMaxwell(Eh, Eh);
+  include "pcb_npatch_precon.idp"
+  cout << "PHASE assembly " << (clock() - tStart) << endl;
+
+  func complex[int] matvec(complex[int] & v) {
+    complex[int] y = Aloc * v;
+    return y;
+  }
+  func complex[int] precon(complex[int] & v) {
+    complex[int] z = npatchPrecon(v);
+    return z;
+  }
+  if (ritzSteps > 0) {
+    runRitz
+  } else if (mrhsMethod != "") {
+    runMrhs
+  } else if (krylovMethod == "cocg") {
+    if (npatchType == 1) {
+      cout << "ERROR: npatch ras is not symmetric (COCG needs a complex-symmetric preconditioner)" << endl;
+      exit(1);
+    }
+    runCocg
+  } else {
+    runGmres
+  }
+} else if (outerMethod == "pc_cocg") {
+  // COCG with a PETSc preconditioner applied through "-ksp_type preonly".
+  // PETSc's own KSPCG is not used (DIVERGED_INDEFINITE_MAT heuristic).
+  matrix<complex> Aloc = aMaxwell(Eh, Eh);
+  Mat<complex> Apc;
+  {
+    macro ThPkPart()Edge03ds0// EOM
+    MatCreate(Th, Apc, Pk);
+  }
+  Apc = Aloc;
+  set(Apc, sparams = petscOptions);
+  cout << "PHASE assembly " << (clock() - tStart) << endl;
+
+  func complex[int] matvec(complex[int] & v) {
+    complex[int] y = Aloc * v;
+    return y;
+  }
+  func complex[int] precon(complex[int] & v) {
+    complex[int] z = Apc^-1 * v;
+    return z;
+  }
+  if (ritzSteps > 0) {
+    runRitz
+  } else if (mrhsMethod != "") {
+    runMrhs
+  } else {
+    runCocg
+  }
+} else {
+  // PETSc KSP + PC (jacobi/gs/ssor/ic0/ilu/amg_gamg/...), options from petscOptions.
+  Mat<complex> A;
+  {
+    macro ThPkPart()Edge03ds0// EOM
+    MatCreate(Th, A, Pk);
+  }
+  A = aMaxwell(Eh, Eh);
+  string kspOpt = petscOptions;
+  if (backend == "hypre") kspOpt = kspOpt + " -pc_type hypre -pc_hypre_type boomeramg";
+  set(A, sparams = kspOpt);
+  cout << "PHASE assembly " << (clock() - tStart) << endl;
+  cout << "PHASE setup_done " << (clock() - tStart) << endl;
+
+  if (mrhsMethod != "") {
+    runMrhsKsp
+  } else {
+    real tSolve0 = clock();
+    Esolx[] = A^-1 * b;
+    cout << "SOLVE_TIME = " << (clock() - tSolve0) << endl;
+  }
+}
+
+cout << "L2 norm(E) = " << Esolx[].l2 << endl;
+
+if (usePML) {
+  // PML diagnostics (same as maxwell_edge03d_solver.edp).
+  Ph0 dPen = max(max(max(x - pmlXmax, pmlXmin - x), max(y - pmlYmax, pmlYmin - y)), max(z - pmlZmax, pmlZmin - z));
+  Ph0 inCore = (dPen <= 0);
+  Ph0 inOuter = (dPen > 0.5 * pmlThick);
+  real vCore = int3d(Th)(inCore), vOuter = int3d(Th)(inOuter);
+  real eCore = int3d(Th)(inCore * (square(abs(Esolx)) + square(abs(Esoly)) + square(abs(Esolz))));
+  real eOuter = int3d(Th)(inOuter * (square(abs(Esolx)) + square(abs(Esoly)) + square(abs(Esolz))));
+  real hb = 0.45 * min(pmlXmax - pmlXmin, min(pmlYmax - pmlYmin, pmlZmax - pmlZmin));
+  real eInner = int3d(Th)((abs(x) < hb) * (abs(y) < hb) * (abs(z) < hb)
+                          * (square(abs(Esolx)) + square(abs(Esoly)) + square(abs(Esolz))));
+  cout << "PML_DIAG rmsCore " << sqrt(eCore / vCore) << " rmsPmlOuter " << sqrt(eOuter / max(vOuter, 1e-30))
+       << " ratio " << sqrt(eOuter / max(vOuter, 1e-30)) / sqrt(eCore / vCore)
+       << " energyInnerBox " << eInner << " halfWidth " << hb << endl;
+}
+cout << "PHASE total " << (clock() - tStart) << endl;
+
+// Solution save / error against a reference (../solution_check.idp; off by default).
+include "solution_check.idp"
+
+// Port voltages / S-parameters and PEC check (after the timed phases).
+if (mrhsMethod != "") {
+  // one S column per right-hand side; the PEC/SIBC checks below use the last one
+  for (int q = 0; q < mrhsNrhs; q++) {
+    Esolx[] = mrhsX[q];
+    excitedPort = q + 1;
+    excR = portRs[q];
+    portReport
+  }
+} else if (nPorts > 0) portReport
+if (pcbDiag) pecReport
+if (pcbDiag) sibcReport
+if (pcbDiag) condReport

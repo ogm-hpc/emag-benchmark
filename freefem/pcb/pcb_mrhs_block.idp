@@ -1,0 +1,146 @@
+// Block flexible GMRES on all right-hand sides together (pcb_mrhs.idp, method
+// "block"). Uses func matvec / func precon of the solver branch.
+//
+// Column-wise (band) block Arnoldi: with p right-hand sides, the residual block
+// R = B - A*X is orthonormalized (modified Gram-Schmidt, R = V(:,0:p-1)*S);
+// each new basis vector V(:,c+p) comes from w = A*z_c, z_c = M^-1 v_c,
+// orthogonalized against all p+c previous vectors, so that
+//   A*Z_M = V_{M+p} * Hbar,   Hbar ((M+p) x M) with lower bandwidth p.
+// The least-squares problems min ||[S;0] - Hbar*Y||, one column per
+// right-hand side, are kept upper-triangular by Givens rotations (p new ones
+// per column, bottom-up); the residual norm of right-hand side q is the norm
+// of rows c+1..c+p of the rotated [S;0]. The subspace has M = p*floor(m/p)
+// vectors per cycle (m = gmresRestartCfg) and the cycle stops when every
+// right-hand side has reached the relative tolerance; X = X + Z*Y.
+// No deflation of converged right-hand sides; a (near-)zero new basis vector
+// is replaced by a random one orthogonal to the basis (H entry 0).
+{
+  int n = Eh.ndof;
+  int p = mrhsNrhs;
+  int mb = max(1, gmresRestartCfg / p);
+  int M = mb * p;
+  complex[int][int] V(M + p), Z(M);
+  for (int j = 0; j < M + p; j++) V[j].resize(n);
+  for (int j = 0; j < M; j++) Z[j].resize(n);
+  complex[int,int] H(M + p, M), G(M + p, p);
+  real[int] rc(M * p);
+  complex[int] rs(M * p);
+  int[int] ra(M * p);
+  int nrot = 0;
+  int blkConv = 0;
+  int it = 0;
+  real[int] relq(p);
+  int[int] itConv(p);               // matrix-vector products when right-hand side q converged
+  itConv = -1;
+  real tb0 = clock();
+
+  while (!blkConv && it < outerMaxIt) {
+    // residual block and its QR
+    complex[int][int] R(p);
+    for (int q = 0; q < p; q++) {
+      R[q].resize(n);
+      complex[int] t = matvec(mrhsX[q]);
+      R[q] = mrhsB[q] - t;
+    }
+    G = 0.0;
+    H = 0.0;
+    nrot = 0;
+    for (int q = 0; q < p; q++) {
+      for (int i = 0; i < q; i++) {
+        complex s = V[i]' * R[q];
+        G(i, q) = s;
+        R[q] -= s * V[i];
+      }
+      real nq = R[q].l2;
+      G(q, q) = nq;
+      if (nq > 1.0e-300) { V[q] = R[q]; V[q] /= nq; }
+      else {
+        // already exact: a random direction orthogonal to the others keeps the basis
+        for (int k = 0; k < n; k++) V[q][k] = randreal1() - 0.5;
+        for (int i = 0; i < q; i++) { complex s = V[i]' * V[q]; V[q] -= s * V[i]; }
+        V[q] /= V[q].l2;
+      }
+    }
+    int Mdim = 0;
+    for (int c = 0; c < M && it < outerMaxIt; c++) {
+      Z[c] = precon(V[c]);
+      complex[int] w = matvec(Z[c]);
+      mrhsMv++;
+      it++;
+      for (int i = 0; i < c + p; i++) {
+        complex hij = V[i]' * w;
+        H(i, c) = hij;
+        w -= hij * V[i];
+      }
+      real h = w.l2;
+      real hscale = 0.0;
+      for (int i = 0; i < c + p; i++) hscale = max(hscale, abs(H(i, c)));
+      if (h > 1.0e-13 * max(hscale, 1.0e-300)) {
+        H(c + p, c) = h;
+        V[c + p] = w;
+        V[c + p] /= h;
+      } else {
+        H(c + p, c) = 0.0;
+        for (int k = 0; k < n; k++) V[c + p][k] = randreal1() - 0.5;
+        for (int i = 0; i < c + p; i++) { complex s = V[i]' * V[c + p]; V[c + p] -= s * V[i]; }
+        V[c + p] /= V[c + p].l2;
+      }
+      // previous rotations on the new column
+      for (int t = 0; t < nrot; t++) {
+        int a = ra[t];
+        complex h1 = H(a, c), h2 = H(a + 1, c);
+        H(a, c) = rc[t] * h1 + rs[t] * h2;
+        H(a + 1, c) = -conj(rs[t]) * h1 + rc[t] * h2;
+      }
+      // new rotations: zero H(c+p,c), ..., H(c+1,c) from the bottom up
+      for (int l = p; l >= 1; l--) {
+        int a = c + l - 1;
+        complex av = H(a, c), bv = H(a + 1, c);
+        real da = abs(av), db = abs(bv);
+        real den = sqrt(da * da + db * db);
+        real cr; complex sr;
+        if (den < 1.0e-300) { cr = 1.0; sr = 0.0; }
+        else if (da < 1.0e-300) { cr = 0.0; sr = 1.0; }
+        else { cr = da / den; sr = (av / da) * conj(bv) / den; }
+        H(a, c) = cr * av + sr * bv;
+        H(a + 1, c) = 0.0;
+        ra[nrot] = a; rc[nrot] = cr; rs[nrot] = sr; nrot++;
+        for (int q = 0; q < p; q++) {
+          complex g1 = G(a, q), g2 = G(a + 1, q);
+          G(a, q) = cr * g1 + sr * g2;
+          G(a + 1, q) = -conj(sr) * g1 + cr * g2;
+        }
+      }
+      // residual norms of the right-hand sides
+      real relMax = 0.0;
+      for (int q = 0; q < p; q++) {
+        real s2 = 0.0;
+        for (int l = c + 1; l <= c + p; l++) s2 += square(abs(G(l, q)));
+        relq[q] = sqrt(s2) / mrhsBnorm[q];
+        if (relq[q] <= outerRtol && itConv[q] < 0) itConv[q] = mrhsMv;
+        relMax = max(relMax, relq[q]);
+      }
+      Mdim = c + 1;
+      cout << mrhsMv << " KSP Residual norm " << relMax << endl;
+      if (relMax <= outerRtol) { blkConv = 1; break; }
+    }
+    // Y = H(0:Mdim-1, 0:Mdim-1)^-1 * G(0:Mdim-1, :), X = X + Z*Y
+    for (int q = 0; q < p; q++) {
+      complex[int] y(Mdim);
+      for (int i = Mdim - 1; i >= 0; i--) {
+        complex s = G(i, q);
+        for (int k = i + 1; k < Mdim; k++) s -= H(i, k) * y[k];
+        y[i] = s / H(i, i);
+      }
+      for (int k = 0; k < Mdim; k++) mrhsX[q] += y[k] * Z[k];
+    }
+  }
+  for (int q = 0; q < p; q++) {
+    complex[int] rt = matvec(mrhsX[q]);
+    rt = mrhsB[q] - rt;
+    int convq = (relq[q] <= outerRtol);
+    if (!convq) mrhsAllConv = 0;
+    cout << "MRHS_DONE " << (q + 1) << " " << itConv[q] << " " << (clock() - tb0) << " "
+         << rt.l2 / mrhsBnorm[q] << " " << convq << endl;
+  }
+}

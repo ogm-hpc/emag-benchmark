@@ -1,0 +1,57 @@
+// Validate a hand-rolled complex restarted-GMRES helper (Arnoldi + Givens
+// rotations + Hessenberg least-squares) against a tiny dense complex system
+// with a known exact solution, before wiring it into the real FEM solver.
+
+int n = 6;
+complex[int, int] Adense(n, n);
+complex[int] xtrue(n), b(n);
+
+// A well-conditioned, non-symmetric complex dense matrix.
+for (int i = 0; i < n; i++) {
+  for (int j = 0; j < n; j++)
+    Adense(i, j) = (i == j) ? (5.0 + 1.0*i + 1i*(1.0 + 0.3*i)) : (0.3/(1.0+abs(i-j)) - 0.1i/(1.0+abs(i-j)));
+  xtrue[i] = 1.0 + 1i*(i - 2.5);
+}
+b = 0.0;
+for (int i = 0; i < n; i++) {
+  complex s = 0;
+  for (int j = 0; j < n; j++) s += Adense(i,j)*xtrue[j];
+  b[i] = s;
+}
+
+func complex[int] matvec(complex[int] & v) {
+  complex[int] y(n);
+  for (int i = 0; i < n; i++) {
+    complex s = 0;
+    for (int j = 0; j < n; j++) s += Adense(i,j)*v[j];
+    y[i] = s;
+  }
+  return y;
+}
+// Identity preconditioner for this toy test (just validating GMRES itself).
+func complex[int] precon(complex[int] & v) {
+  complex[int] z(n);
+  z = v;
+  return z;
+}
+
+int gmresN = n;
+complex[int] gmresB(n);
+gmresB = b;
+complex[int] gmresX(n);
+gmresX = 0.0;
+real gmresRtol = 1e-10;
+int gmresMaxIt = 100;
+int gmresRestart = 20;
+int gmresIterCount = 0;
+real gmresRelRes = 1.0;
+int gmresConverged = 0;
+
+include "gmres_precon.idp"
+
+cout << "gmresIterCount = " << gmresIterCount << " relRes=" << gmresRelRes << " converged=" << gmresConverged << endl;
+
+complex[int] err(n);
+err = gmresX;
+err -= xtrue;
+cout << "||x - xtrue|| = " << err.l2 << " (xtrue.l2=" << xtrue.l2 << ")" << endl;

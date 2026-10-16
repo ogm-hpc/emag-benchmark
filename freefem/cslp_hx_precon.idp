@@ -1,0 +1,200 @@
+// Combined CSLP + 3-term HX preconditioner:
+//   cslpHxPrecon(r) = P^-1*r + G*(Mgrad^-1*(G^T*r)) + Pi*(MvecShift^-1*(Pi^T*r))
+// P (from CSLP) replaces HX's plain-Jacobi smoother term outright -- P^-1 is
+// already a far richer, indefiniteness-aware correction than a diagonal
+// sweep. Mgrad needs no shift (restriction of A's bilinear form to
+// gradients loses the curl-curl term entirely, leaving a stiffness-type
+// form that is not sign-indefinite). MvecShift DOES need the CSLP-style
+// complex shift: unlike Mgrad, general P1^3 fields have nonzero curl, so
+// the auxiliary vector-Laplacian problem keeps the curl-curl term and
+// inherits A's full sign-indefiniteness -- confirmed empirically (pure
+// 3-term HX, unshifted Mvec, showed fast early convergence on case2A but
+// pronounced deceleration/near-stall by ~1100 iterations; this shift is the
+// fix motivated by that finding, see problem_settings.md).
+//
+// Include-style code block, operating on caller-defined globals already
+// present in maxwell_edge03d_solver.edp's scope: mesh3 Th, func Pk, real k0,
+// string petscOptions, real cslpBeta1, cslpBeta2, pecLabel1..pecLabel8,
+// useSM, the varf aMaxwellShift, the gradTerm/tangDot/isSMLabel macros
+// (material + UPML tensors), and fespace Eh.
+// On return: a ready-to-use func complex[int] cslpHxPrecon(complex[int] & r).
+//
+// 2026-09-28: the Pi/MvecShift (3rd-term) construction is compiled only when
+// the macro HXVECTERM is defined (default: not) -- it used to be built and
+// never used. P is assembled directly into the PETSc Mat unless it is needed
+// as a plain matrix for the Galerkin product.
+
+load "mat_edgeP1"
+
+// --- CSLP half: shifted operator P, solved via PETSc/GAMG. ---
+Mat<complex> cslpHxP;
+{
+  macro ThPkPart()Edge03ds0// EOM
+  MatCreate(Th, cslpHxP, Pk);
+}
+IFMACRO(HXVECTERM)
+matrix<complex> cslpHxAlocShift = aMaxwellShift(Eh, Eh);
+cslpHxP = cslpHxAlocShift;
+ENDIFMACRO
+IFMACRO(!HXVECTERM)
+cslpHxP = aMaxwellShift(Eh, Eh);
+ENDIFMACRO
+set(cslpHxP, sparams = petscOptions);
+
+// --- HX gradient half: G + Mgrad (unshifted; see hx_precon.idp). ---
+matrix cslpHxGLoc;
+MatrixEdgeP1(cslpHxGLoc, Th);
+
+func PkCslpHxNode = P1;
+fespace CslpHxPh(Th, PkCslpHxNode);
+
+varf cslpHxVMgrad(p, q) =
+    int3d(Th)( -(k0 * k0) * gradTerm(p, q) )
+  + int2d(Th)( useSM * isSMLabel(label) * 1i * k0 * tangDot(dx(p), dy(p), dz(p), dx(q), dy(q), dz(q)) )
+  + on(pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+       pecLabel5, pecLabel6, pecLabel7, pecLabel8, p = 0);
+
+Mat<complex> cslpHxMgrad;
+MatCreate(Th, cslpHxMgrad, PkCslpHxNode);
+cslpHxMgrad = cslpHxVMgrad(CslpHxPh, CslpHxPh);
+set(cslpHxMgrad, sparams = petscOptions);
+
+IFMACRO(HXVECTERM)
+
+// --- HX vector half: Pi + MvecShift (shifted, see file header). ---
+int cslpHxNEdge = cslpHxGLoc.n;
+int cslpHxNNode = cslpHxGLoc.m;
+int[int] cslpHxEdgeTail(cslpHxNEdge), cslpHxEdgeHead(cslpHxNEdge);
+{
+  int[int] cslpHxGI, cslpHxGJ;
+  real[int] cslpHxGC;
+  [cslpHxGI, cslpHxGJ, cslpHxGC] = cslpHxGLoc;
+  // See hx_precon.idp: MatrixEdgeP1's COO extraction carries one extra
+  // out-of-range (row=cslpHxNEdge, col=cslpHxNNode) sentinel entry.
+  for (int t = 0; t < cslpHxGI.n; t++) {
+    if (cslpHxGI[t] >= cslpHxNEdge || cslpHxGJ[t] >= cslpHxNNode) continue;
+    if (cslpHxGC[t] < 0) cslpHxEdgeTail[cslpHxGI[t]] = cslpHxGJ[t];
+    else cslpHxEdgeHead[cslpHxGI[t]] = cslpHxGJ[t];
+  }
+}
+
+CslpHxPh cslpHxX = x, cslpHxY = y, cslpHxZ = z;
+
+int[int] cslpHxPiRows(6 * cslpHxNEdge + 1), cslpHxPiCols(6 * cslpHxNEdge + 1);
+real[int] cslpHxPiVals(6 * cslpHxNEdge + 1);
+{
+  int t = 0;
+  for (int e = 0; e < cslpHxNEdge; e++) {
+    int n1 = cslpHxEdgeTail[e], n2 = cslpHxEdgeHead[e];
+    real ddx = cslpHxX[][n2] - cslpHxX[][n1];
+    real ddy = cslpHxY[][n2] - cslpHxY[][n1];
+    real ddz = cslpHxZ[][n2] - cslpHxZ[][n1];
+    cslpHxPiRows[t] = e; cslpHxPiCols[t] = 3*n1 + 0; cslpHxPiVals[t] = ddx / 2.0; t += 1;
+    cslpHxPiRows[t] = e; cslpHxPiCols[t] = 3*n1 + 1; cslpHxPiVals[t] = ddy / 2.0; t += 1;
+    cslpHxPiRows[t] = e; cslpHxPiCols[t] = 3*n1 + 2; cslpHxPiVals[t] = ddz / 2.0; t += 1;
+    cslpHxPiRows[t] = e; cslpHxPiCols[t] = 3*n2 + 0; cslpHxPiVals[t] = ddx / 2.0; t += 1;
+    cslpHxPiRows[t] = e; cslpHxPiCols[t] = 3*n2 + 1; cslpHxPiVals[t] = ddy / 2.0; t += 1;
+    cslpHxPiRows[t] = e; cslpHxPiCols[t] = 3*n2 + 2; cslpHxPiVals[t] = ddz / 2.0; t += 1;
+  }
+  cslpHxPiRows[t] = 0; cslpHxPiCols[t] = 3 * cslpHxNNode - 1; cslpHxPiVals[t] = 0.0;
+}
+matrix cslpHxPi = [cslpHxPiRows, cslpHxPiCols, cslpHxPiVals];
+
+// --- MvecShift: per Hiptmair-Xu/HYPRE AMS theory (see hx_precon.idp's
+// 2026-07-29 fix and problem_settings.md's writeup), the auxiliary
+// vector-space operator must be the GALERKIN PROJECTION of the ORIGINAL
+// (here: CSLP-shifted) edge-space operator through Pi, MvecShift =
+// Pi^T*cslpHxAlocShift*Pi -- NOT an independently re-discretized curl-curl-
+// shifted-k^2*eps bilinear form directly on the P1^3 space (this file's
+// earlier version did the latter, sharing hx_precon.idp's original
+// theoretical-fidelity gap). Boundary nodal DOFs are explicitly
+// zeroed/re-diagonalized (identified via Th.be(k), independent of Pi's own
+// structure) since projecting Aloc's edge-space PEC elimination through Pi
+// does not automatically yield a clean Dirichlet block on the P1^3 space.
+complex[int] cslpHxPiValsC(cslpHxPiVals.n);
+for (int t = 0; t < cslpHxPiVals.n; t++) cslpHxPiValsC[t] = cslpHxPiVals[t];
+matrix<complex> cslpHxPiC = [cslpHxPiRows, cslpHxPiCols, cslpHxPiValsC];
+
+matrix<complex> cslpHxAPi = cslpHxAlocShift * cslpHxPiC;
+matrix<complex> cslpHxMvecGalerkin = cslpHxPiC' * cslpHxAPi;
+
+int[int] cslpHxBndNode(cslpHxNNode);
+cslpHxBndNode = 0;
+for (int k = 0; k < Th.nbe; k++) {
+  int lab = Th.be(k).label;
+  bool isPec = (lab == pecLabel1) || (lab == pecLabel2) || (lab == pecLabel3) || (lab == pecLabel4)
+             || (lab == pecLabel5) || (lab == pecLabel6) || (lab == pecLabel7) || (lab == pecLabel8);
+  if (isPec) {
+    for (int v = 0; v < 3; v++) cslpHxBndNode[Th.be(k)[v]] = 1;
+  }
+}
+int cslpHxNBndNode = 0;
+for (int n = 0; n < cslpHxNNode; n++) if (cslpHxBndNode[n] == 1) cslpHxNBndNode += 1;
+
+matrix<complex> cslpHxMvecRaw;
+{
+  int[int] cslpHxMI, cslpHxMJ;
+  complex[int] cslpHxMC;
+  [cslpHxMI, cslpHxMJ, cslpHxMC] = cslpHxMvecGalerkin;
+  int nnz = cslpHxMI.n;
+  int[int] cslpHxMI2(nnz + 3 * cslpHxNBndNode);
+  int[int] cslpHxMJ2(nnz + 3 * cslpHxNBndNode);
+  complex[int] cslpHxMC2(nnz + 3 * cslpHxNBndNode);
+  for (int t = 0; t < nnz; t++) {
+    int ni = cslpHxMI[t] / 3;
+    int nj = cslpHxMJ[t] / 3;
+    cslpHxMI2[t] = cslpHxMI[t];
+    cslpHxMJ2[t] = cslpHxMJ[t];
+    cslpHxMC2[t] = (cslpHxBndNode[ni] == 1 || cslpHxBndNode[nj] == 1) ? 0.0 : cslpHxMC[t];
+  }
+  int t = nnz;
+  for (int n = 0; n < cslpHxNNode; n++) {
+    if (cslpHxBndNode[n] == 1) {
+      for (int c = 0; c < 3; c++) {
+        cslpHxMI2[t] = 3 * n + c; cslpHxMJ2[t] = 3 * n + c; cslpHxMC2[t] = 1.0; t += 1;
+      }
+    }
+  }
+  cslpHxMvecRaw = [cslpHxMI2, cslpHxMJ2, cslpHxMC2];
+}
+
+// See hx_precon.idp's note on def/init ordering: must be defined immediately
+// before this point, not any earlier (would wrongly vector-dispatch the
+// scalar cslpHxMgrad MatCreate above).
+macro def(i)[i, i#B, i#C]// EOM
+macro init(i)[i, i, i]// EOM
+func PkCslpHxVec = [P1, P1, P1];
+fespace CslpHxVh(Th, PkCslpHxVec);
+
+Mat<complex> cslpHxMvec;
+MatCreate(Th, cslpHxMvec, PkCslpHxVec);
+cslpHxMvec = cslpHxMvecRaw;
+set(cslpHxMvec, sparams = petscOptions, bs = 3);
+
+ENDIFMACRO
+
+// The vector term is disabled by default -- mirrors hx_precon.idp (see its
+// 2026-07-29 file-header note): enabling it reproduces the same GMRES-
+// stagnation defect. Define HXVECTERM only for debugging that investigation.
+func complex[int] cslpHxPrecon(complex[int] & r) {
+  complex[int] fine = cslpHxP^-1 * r;
+
+  complex[int] rNode = cslpHxGLoc' * r;
+  complex[int] pNode = cslpHxMgrad^-1 * rNode;
+  complex[int] gradCorrection = cslpHxGLoc * pNode;
+
+  complex[int] z(r.n);
+  z = fine;
+  z += gradCorrection;
+
+  IFMACRO(HXVECTERM)
+    complex[int] rVec = cslpHxPi' * r;
+    for (int n = 0; n < cslpHxNNode; n++)
+      if (cslpHxBndNode[n] == 1)
+        for (int c = 0; c < 3; c++) rVec[3*n + c] = 0.0;
+    complex[int] uVec = cslpHxMvec^-1 * rVec;
+    complex[int] vecCorrection = cslpHxPi * uVec;
+    z += vecCorrection;
+  ENDIFMACRO
+  return z;
+}

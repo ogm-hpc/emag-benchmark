@@ -1,0 +1,40 @@
+// Accelerated IC(0) (Fujiwara/Nakata/Fusayasu-style), PETSc-backed.
+//
+// The accelerated IC(0) of accel_ic_precon.idp is: standard fill-dropping
+// IC(0) (same pattern as A, L D L^T, complex-symmetric -- no conjugation)
+// where each pivot starts from alpha*a_ii instead of a_ii. The original
+// diagonal enters the factorization ONLY as that starting value, so this is
+// algebraically identical to plain IC(0) of A' = A with diag(A) scaled by
+// alpha -- which PETSc's ICC(0) computes in compiled code.
+//
+// Verified 2026-09-28 on case2A_standard (n=92281, alpha=1.5): for z =
+// precon(b), ||z_script - z_petsc|| / ||z_script|| = 3.4e-16 (identical to
+// rounding), with setup 40 s -> 0.04 s and one application 0.42 s ->
+// 0.004 s. Requirements for the identity: natural ordering (no reordering),
+// no pivot shift (-pc_factor_shift_type none), levels 0. The script
+// implementation (accel_ic_precon.idp) is kept as the reference and for the
+// toy tests.
+//
+// Include-style block. Caller-defined globals: mesh3 Th, func Pk,
+// matrix<complex> Aloc (the system matrix, PEC rows already eliminated),
+// real accelIcAlpha. On return: func complex[int] accelICPrecon(complex[int] &).
+
+matrix<complex> aicAp = Aloc;
+{
+  complex[int] aicDg = Aloc.diag;
+  aicDg *= accelIcAlpha;
+  aicAp.diag = aicDg;
+}
+Mat<complex> aicPc;
+{
+  macro ThPkPart()Edge03ds0// EOM
+  MatCreate(Th, aicPc, Pk);
+}
+aicPc = aicAp;
+set(aicPc, sparams = "-ksp_type preonly -pc_type icc -pc_factor_levels 0 "
+                     + "-pc_factor_shift_type none -pc_factor_mat_ordering_type natural");
+
+func complex[int] accelICPrecon(complex[int] & r) {
+  complex[int] z = aicPc^-1 * r;
+  return z;
+}

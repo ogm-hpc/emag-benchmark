@@ -1,0 +1,112 @@
+// Shared problem definition for maxwell_edge03d_solver.edp and resonance_check.edp:
+// material coefficients, anisotropic UPML tensors, integrand macros and the
+// system bilinear forms. Requires (caller): runtime_case_config.idp included,
+// mesh3 Th, fespace Eh(Th, Edge03d).
+//
+// Time convention: exp(+i*omega*t) -- outgoing waves ~ exp(-i*k*r), lossy media
+// eps = eps'*(1 - i*tan(delta)), Silver-Mueller term +i*k0*E_t.V_t.
+
+// ---------------------------------------------------------------------------
+// Coefficients
+// ---------------------------------------------------------------------------
+func real epsrRegion(int r) {
+  real v = 1.0;
+  if (r == labSphereDielectric) v = epsSphere;
+  if (r == labLayer2) v = kappa;
+  if (r == labPTFE) v = epsPTFE;
+  if (r == labAlumina) v = epsAlumina;
+  if (r == labEps100) v = 100.0;
+  if (r == labEps1) v = 1.0;
+  if (r == labRodsHighEps) v = epsRods;
+  if (r == labLossy) v = epsLossy;
+  if (r == labLossyMaterial) v = epsLossy;
+  if (r == labHighK) v = kappa;
+  return v;
+}
+func real lossRegion(int r) {
+  real td = 0.0;
+  if (r == labLossyMaterial) td = tanDelta;
+  if (r == labLossy) td = tanDelta;
+  return td;
+}
+
+// Material permittivity, piecewise constant per region (P0 interpolation at the
+// element barycenter reads that element's region label). Evaluated once here
+// instead of calling the script funcs at every quadrature point.
+fespace Ph0(Th, P0);
+Ph0<complex> epsC = epsrRegion(region) * (1.0 - 1i * lossRegion(region));
+
+// Anisotropic UPML (stretched coordinates). Outside the core box
+// [pmlXmin,pmlXmax]x[pmlYmin,pmlYmax]x[pmlZmin,pmlZmax] each direction is
+// stretched by s_q = 1 - i*sigma_q/k0, sigma_q = pmlSigmaMax*(d_q/pmlThick)^2
+// (d_q = penetration depth along q; exp(-ikx) waves decay as exp(-int sigma)).
+// Material tensors: eps~ = eps*Lambda, mu~ = Lambda,
+// Lambda = diag(sy*sz/sx, sx*sz/sy, sx*sy/sz). Corners/edges of the PML get
+// the product of the relevant stretches automatically. Lambda = I in the core.
+fespace Ph1(Th, P1);
+Ph1<complex> pmlSx = 1.0, pmlSy = 1.0, pmlSz = 1.0;
+if (usePML) {
+  real sk = pmlSigmaMax / k0;
+  real ti = 1.0 / pmlThick;
+  pmlSx = 1.0 - 1i * sk * square((max(x - pmlXmax, 0.0) + max(pmlXmin - x, 0.0)) * ti);
+  pmlSy = 1.0 - 1i * sk * square((max(y - pmlYmax, 0.0) + max(pmlYmin - y, 0.0)) * ti);
+  pmlSz = 1.0 - 1i * sk * square((max(z - pmlZmax, 0.0) + max(pmlZmin - z, 0.0)) * ti);
+}
+Ph1<complex> lamX = pmlSy * pmlSz / pmlSx;   // mass-term tensor (times eps)
+Ph1<complex> lamY = pmlSx * pmlSz / pmlSy;
+Ph1<complex> lamZ = pmlSx * pmlSy / pmlSz;
+Ph1<complex> ilamX = pmlSx / (pmlSy * pmlSz); // curl-term tensor (mu~^-1)
+Ph1<complex> ilamY = pmlSy / (pmlSx * pmlSz);
+Ph1<complex> ilamZ = pmlSz / (pmlSx * pmlSy);
+
+macro dot3(a1,a2,a3,b1,b2,b3) ((a1)*(b1) + (a2)*(b2) + (a3)*(b3)) //
+macro ndot(u1,u2,u3) (N.x*(u1) + N.y*(u2) + N.z*(u3)) //
+macro tangDot(u1,u2,u3,v1,v2,v3) (
+  ((u1)-N.x*ndot(u1,u2,u3))*((v1)-N.x*ndot(v1,v2,v3))
++ ((u2)-N.y*ndot(u1,u2,u3))*((v2)-N.y*ndot(v1,v2,v3))
++ ((u3)-N.z*ndot(u1,u2,u3))*((v3)-N.z*ndot(v1,v2,v3))
+) //
+// (mu~^-1 curl E) . curl V
+macro curlTerm(Ex,Ey,Ez,Vx,Vy,Vz) (
+  ilamX * (dy(Ez) - dz(Ey)) * (dy(Vz) - dz(Vy))
++ ilamY * (dz(Ex) - dx(Ez)) * (dz(Vx) - dx(Vz))
++ ilamZ * (dx(Ey) - dy(Ex)) * (dx(Vy) - dy(Vx))
+) //
+// (eps~ E) . V
+macro massTerm(Ex,Ey,Ez,Vx,Vy,Vz) (
+  epsC * (lamX * (Ex) * (Vx) + lamY * (Ey) * (Vy) + lamZ * (Ez) * (Vz))
+) //
+// grad-restricted form, used by the HX gradient correction: A(grad p, grad q)
+macro gradTerm(p,q) (
+  epsC * (lamX * dx(p) * dx(q) + lamY * dy(p) * dy(q) + lamZ * dz(p) * dz(q))
+) //
+
+// Boundary labels on which the Silver-Mueller term is active.
+macro isSMLabel(lb) ((lb == smLabel1) + (lb == smLabel2) + (lb == smLabel3) + (lb == smLabel4)) //
+
+// PEC (tangential E = 0) is imposed strongly via on(): for Whitney edge
+// elements this zeroes exactly the DOFs of edges lying in PEC faces.
+varf aMaxwell([Ex, Ey, Ez], [Vx, Vy, Vz]) =
+    int3d(Th)(
+        curlTerm(Ex, Ey, Ez, Vx, Vy, Vz)
+      - (k0 * k0) * massTerm(Ex, Ey, Ez, Vx, Vy, Vz)
+    )
+  + int2d(Th)(
+        useSM * isSMLabel(label) * 1i * k0 * tangDot(Ex, Ey, Ez, Vx, Vy, Vz)
+    )
+  + on(pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+       pecLabel5, pecLabel6, pecLabel7, pecLabel8,
+       Ex = 0, Ey = 0, Ez = 0);
+
+// CSLP-shifted operator: the -k0^2 term multiplied by (beta1 - i*beta2).
+varf aMaxwellShift([Ex, Ey, Ez], [Vx, Vy, Vz]) =
+    int3d(Th)(
+        curlTerm(Ex, Ey, Ez, Vx, Vy, Vz)
+      - (k0 * k0) * (cslpBeta1 - 1i * cslpBeta2) * massTerm(Ex, Ey, Ez, Vx, Vy, Vz)
+    )
+  + int2d(Th)(
+        useSM * isSMLabel(label) * 1i * k0 * tangDot(Ex, Ey, Ez, Vx, Vy, Vz)
+    )
+  + on(pecLabel1, pecLabel2, pecLabel3, pecLabel4,
+       pecLabel5, pecLabel6, pecLabel7, pecLabel8,
+       Ex = 0, Ey = 0, Ez = 0);

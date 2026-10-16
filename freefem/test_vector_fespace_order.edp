@@ -1,0 +1,31 @@
+// Verify FreeFEM's DOF ordering convention for a bundled vector fespace
+// [P1,P1,P1]: is it interleaved-by-node (3*i, 3*i+1, 3*i+2 for node i's
+// x,y,z components) or blocked (all x, then all y, then all z)? This
+// matters for constructing Pi (P1^3 -> Edge03d tangential interpolation).
+
+mesh3 Th = cube(2, 2, 2);
+fespace Ph(Th, P1);
+fespace Vh(Th, [P1, P1, P1]);
+
+cout << "Ph.ndof=" << Ph.ndof << " Vh.ndof=" << Vh.ndof << endl;
+
+Vh [ux, uy, uz];
+// Fill the WHOLE underlying array with sequential markers so we can see
+// how components interleave: node i should show a recognizable pattern
+// if ux[], uy[], uz[] all alias the same combined array.
+for (int k = 0; k < ux[].n; k++) ux[][k] = k;
+
+cout << "ux[](node0..2)=" << ux[](0) << " -- direct array probe below" << endl;
+cout << "ux[] raw first 9 entries: ";
+for (int k = 0; k < 9; k++) cout << ux[][k] << " ";
+cout << endl;
+
+// Now check: does assigning via the bundled [ux,uy,uz] = [f1,f2,f3] syntax
+// put node i's x-component at index 3*i (interleaved) or i (blocked)?
+fespace PhCoord(Th, P1);
+PhCoord X = x, Y = y, Z = z;
+Vh [wx, wy, wz] = [X, Y+1000, Z+2000];
+cout << "wx[] raw first 9 (expect X,Y+1000,Z+2000 interleaved-by-node if 3*i pattern): ";
+for (int k = 0; k < 9; k++) cout << wx[][k] << " ";
+cout << endl;
+cout << "X[] raw first 3 (node coords, for reference): " << X[](0) << " " << X[](1) << " " << X[](2) << endl;
