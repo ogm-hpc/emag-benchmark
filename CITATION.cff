@@ -16,8 +16,19 @@ keywords:
   - Maxwell equations
   - edge element
   - finite element method
+preferred-citation:
+  type: article
+  title: "Construction of an Iterative Solver Benchmark for High-Frequency Electromagnetic Finite Element Analysis: Canonical Problems and Printed Circuit Boards"
+  authors:
+    - family-names: Ogino
+      given-names: Masao
+      affiliation: Daido University
+  journal: "Transactions of JSCES"
+  status: submitted
+  languages:
+    - ja
 references:
-  - type: dataset
+  - type: data
     title: "Iterative Solver Benchmark for High-Frequency Electromagnetic Finite Element Analysis, all instances, version 1.0"
     authors:
       - family-names: Ogino
