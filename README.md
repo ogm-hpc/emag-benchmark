@@ -70,7 +70,7 @@ convergence or at the iteration cap K_max; there is no time limit. One process, 
 
 | Combination | K_max | Remark |
 |---|---|---|
-| Gauss–Seidel + GMRES | 10,000 | forward sweep |
+| FGS + GMRES | 10,000 | forward Gauss–Seidel (FGS) |
 | SSOR + GMRES | 10,000 | |
 | SSOR + COCG | 50,000 | |
 | GAMG + GMRES | 10,000 | one V-cycle |
